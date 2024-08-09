@@ -101,8 +101,10 @@ void Element::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_class_list);
     visitor.visit(m_shadow_root);
     visitor.visit(m_custom_element_definition);
-    if (m_pseudo_element_nodes) {
-        visitor.visit(m_pseudo_element_nodes->span());
+    if (m_pseudo_element_data) {
+        for (auto& pseudo_element : *m_pseudo_element_data) {
+            visitor.visit(pseudo_element.layout_node);
+        }
     }
     if (m_registered_intersection_observers) {
         for (auto& registered_intersection_observers : *m_registered_intersection_observers)
@@ -338,9 +340,8 @@ bool Element::has_attribute_ns(Optional<FlyString> const& namespace_, FlyString 
 WebIDL::ExceptionOr<bool> Element::toggle_attribute(FlyString const& name, Optional<bool> force)
 {
     // 1. If qualifiedName does not match the Name production in XML, then throw an "InvalidCharacterError" DOMException.
-    // FIXME: Proper name validation
-    if (name.is_empty())
-        return WebIDL::InvalidCharacterError::create(realm(), "Attribute name must not be empty"_fly_string);
+    if (!Document::is_valid_name(name.to_string()))
+        return WebIDL::InvalidCharacterError::create(realm(), "Attribute name must not be empty or contain invalid characters"_fly_string);
 
     // 2. If this is in the HTML namespace and its node document is an HTML document, then set qualifiedName to qualifiedName in ASCII lowercase.
     bool insert_as_lowercase = namespace_uri() == Namespace::HTML && document().document_type() == Document::Type::HTML;
@@ -394,7 +395,7 @@ JS::GCPtr<Layout::Node> Element::create_layout_node(NonnullRefPtr<CSS::StyleProp
     return create_layout_node_for_display_type(document(), display, move(style), this);
 }
 
-JS::GCPtr<Layout::Node> Element::create_layout_node_for_display_type(DOM::Document& document, CSS::Display const& display, NonnullRefPtr<CSS::StyleProperties> style, Element* element)
+JS::GCPtr<Layout::NodeWithStyle> Element::create_layout_node_for_display_type(DOM::Document& document, CSS::Display const& display, NonnullRefPtr<CSS::StyleProperties> style, Element* element)
 {
     if (display.is_table_inside() || display.is_table_row_group() || display.is_table_header_group() || display.is_table_footer_group() || display.is_table_row())
         return document.heap().allocate_without_realm<Layout::Box>(document, element, move(style));
@@ -457,25 +458,29 @@ void Element::attribute_changed(FlyString const& name, Optional<String> const&, 
     auto value_or_empty = value.value_or(String {});
 
     if (name == HTML::AttributeNames::id) {
-        if (!value.has_value())
+        if (value_or_empty.is_empty())
             m_id = {};
         else
             m_id = value_or_empty;
 
         document().element_id_changed({}, *this);
     } else if (name == HTML::AttributeNames::name) {
-        if (!value.has_value())
+        if (value_or_empty.is_empty())
             m_name = {};
         else
             m_name = value_or_empty;
 
         document().element_name_changed({}, *this);
     } else if (name == HTML::AttributeNames::class_) {
-        auto new_classes = value_or_empty.bytes_as_string_view().split_view_if(Infra::is_ascii_whitespace);
-        m_classes.clear();
-        m_classes.ensure_capacity(new_classes.size());
-        for (auto& new_class : new_classes) {
-            m_classes.unchecked_append(FlyString::from_utf8(new_class).release_value_but_fixme_should_propagate_errors());
+        if (value_or_empty.is_empty()) {
+            m_classes.clear();
+        } else {
+            auto new_classes = value_or_empty.bytes_as_string_view().split_view_if(Infra::is_ascii_whitespace);
+            m_classes.clear();
+            m_classes.ensure_capacity(new_classes.size());
+            for (auto& new_class : new_classes) {
+                m_classes.unchecked_append(FlyString::from_utf8(new_class).release_value_but_fixme_should_propagate_errors());
+            }
         }
         if (m_class_list)
             m_class_list->associated_attribute_changed(value_or_empty);
@@ -529,7 +534,8 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_style()
     set_needs_style_update(false);
     VERIFY(parent());
 
-    auto new_computed_css_values = document().style_computer().compute_style(*this);
+    auto& style_computer = document().style_computer();
+    auto new_computed_css_values = style_computer.compute_style(*this);
 
     // Tables must not inherit -libweb-* values for text-align.
     // FIXME: Find the spec for this.
@@ -545,11 +551,30 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_style()
     else
         invalidation = CSS::RequiredInvalidationAfterStyleChange::full();
 
+    if (!invalidation.is_none())
+        set_computed_css_values(move(new_computed_css_values));
+
+    // Any document change that can cause this element's style to change, could also affect its pseudo-elements.
+    for (auto i = 0; i < to_underlying(CSS::Selector::PseudoElement::Type::KnownPseudoElementCount); i++) {
+        style_computer.push_ancestor(*this);
+
+        auto pseudo_element = static_cast<CSS::Selector::PseudoElement::Type>(i);
+        auto pseudo_element_style = pseudo_element_computed_css_values(pseudo_element);
+        auto new_pseudo_element_style = style_computer.compute_pseudo_element_style_if_needed(*this, pseudo_element);
+
+        // TODO: Can we be smarter about invalidation?
+        if (pseudo_element_style && new_pseudo_element_style) {
+            invalidation |= compute_required_invalidation(*pseudo_element_style, *new_pseudo_element_style);
+        } else if (pseudo_element_style || new_pseudo_element_style) {
+            invalidation = CSS::RequiredInvalidationAfterStyleChange::full();
+        }
+
+        set_pseudo_element_computed_css_values(pseudo_element, move(new_pseudo_element_style));
+        style_computer.pop_ancestor(*this);
+    }
+
     if (invalidation.is_none())
         return invalidation;
-
-    m_computed_css_values = move(new_computed_css_values);
-    computed_css_values_changed();
 
     if (invalidation.repaint)
         document().set_needs_to_resolve_paint_only_properties();
@@ -559,14 +584,32 @@ CSS::RequiredInvalidationAfterStyleChange Element::recompute_style()
         layout_node()->apply_style(*m_computed_css_values);
         if (invalidation.repaint && paintable())
             paintable()->set_needs_display();
+
+        // Do the same for pseudo-elements.
+        for (auto i = 0; i < to_underlying(CSS::Selector::PseudoElement::Type::KnownPseudoElementCount); i++) {
+            auto pseudo_element_type = static_cast<CSS::Selector::PseudoElement::Type>(i);
+            auto pseudo_element = get_pseudo_element(pseudo_element_type);
+            if (!pseudo_element.has_value() || !pseudo_element->layout_node)
+                continue;
+
+            auto pseudo_element_style = pseudo_element_computed_css_values(pseudo_element_type);
+            if (!pseudo_element_style)
+                continue;
+
+            if (auto* node_with_style = dynamic_cast<Layout::NodeWithStyle*>(pseudo_element->layout_node.ptr())) {
+                node_with_style->apply_style(*pseudo_element_style);
+                if (invalidation.repaint && node_with_style->paintable())
+                    node_with_style->paintable()->set_needs_display();
+            }
+        }
     }
 
     return invalidation;
 }
 
-NonnullRefPtr<CSS::StyleProperties> Element::resolved_css_values()
+NonnullRefPtr<CSS::StyleProperties> Element::resolved_css_values(Optional<CSS::Selector::PseudoElement::Type> type)
 {
-    auto element_computed_style = CSS::ResolvedCSSStyleDeclaration::create(*this);
+    auto element_computed_style = CSS::ResolvedCSSStyleDeclaration::create(*this, type);
     auto properties = CSS::StyleProperties::create();
 
     for (auto i = to_underlying(CSS::first_property_id); i <= to_underlying(CSS::last_property_id); ++i) {
@@ -574,7 +617,7 @@ NonnullRefPtr<CSS::StyleProperties> Element::resolved_css_values()
         auto maybe_value = element_computed_style->property(property_id);
         if (!maybe_value.has_value())
             continue;
-        properties->set_property(property_id, maybe_value.release_value().value, nullptr);
+        properties->set_property(property_id, maybe_value.release_value().value);
     }
 
     return properties;
@@ -716,7 +759,7 @@ WebIDL::ExceptionOr<bool> Element::matches(StringView selectors) const
     // 3. If the result of match a selector against an element, using s, this, and scoping root this, returns success, then return true; otherwise, return false.
     auto sel = maybe_selectors.value();
     for (auto& s : sel) {
-        if (SelectorEngine::matches(s, {}, *this, {}, static_cast<ParentNode const*>(this)))
+        if (SelectorEngine::matches(s, {}, *this, nullptr, {}, static_cast<ParentNode const*>(this)))
             return true;
     }
     return false;
@@ -735,7 +778,7 @@ WebIDL::ExceptionOr<DOM::Element const*> Element::closest(StringView selectors) 
     auto matches_selectors = [this](CSS::SelectorList const& selector_list, Element const* element) {
         // 4. For each element in elements, if match a selector against an element, using s, element, and scoping root this, returns success, return element.
         for (auto const& selector : selector_list) {
-            if (SelectorEngine::matches(selector, {}, *element, {}, this))
+            if (SelectorEngine::matches(selector, {}, *element, nullptr, {}, this))
                 return true;
         }
         return false;
@@ -814,21 +857,6 @@ bool Element::is_document_element() const
     return parent() == &document();
 }
 
-JS::NonnullGCPtr<HTMLCollection> Element::get_elements_by_class_name(StringView class_names)
-{
-    Vector<FlyString> list_of_class_names;
-    for (auto& name : class_names.split_view_if(Infra::is_ascii_whitespace)) {
-        list_of_class_names.append(FlyString::from_utf8(name).release_value_but_fixme_should_propagate_errors());
-    }
-    return HTMLCollection::create(*this, HTMLCollection::Scope::Descendants, [list_of_class_names = move(list_of_class_names), quirks_mode = document().in_quirks_mode()](Element const& element) {
-        for (auto& name : list_of_class_names) {
-            if (!element.has_class(name, quirks_mode ? CaseSensitivity::CaseInsensitive : CaseSensitivity::CaseSensitive))
-                return false;
-        }
-        return true;
-    });
-}
-
 // https://dom.spec.whatwg.org/#element-shadow-host
 bool Element::is_shadow_host() const
 {
@@ -866,14 +894,9 @@ void Element::make_html_uppercased_qualified_name()
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#queue-an-element-task
-int Element::queue_an_element_task(HTML::Task::Source source, Function<void()> steps)
+HTML::TaskID Element::queue_an_element_task(HTML::Task::Source source, Function<void()> steps)
 {
-    auto task = HTML::Task::create(vm(), source, &document(), JS::create_heap_function(heap(), move(steps)));
-    auto id = task->id();
-
-    HTML::main_thread_event_loop().task_queue().add(move(task));
-
-    return id;
+    return queue_a_task(source, HTML::main_thread_event_loop(), document(), JS::create_heap_function(heap(), move(steps)));
 }
 
 // https://html.spec.whatwg.org/multipage/syntax.html#void-elements
@@ -926,7 +949,9 @@ JS::NonnullGCPtr<Geometry::DOMRect> Element::get_bounding_client_rect() const
 // https://drafts.csswg.org/cssom-view/#dom-element-getclientrects
 JS::NonnullGCPtr<Geometry::DOMRectList> Element::get_client_rects() const
 {
-    Vector<JS::Handle<Geometry::DOMRect>> rects;
+    auto navigable = document().navigable();
+    if (!navigable)
+        return Geometry::DOMRectList::create(realm(), {});
 
     // NOTE: Ensure that layout is up-to-date before looking at metrics.
     const_cast<Document&>(document()).update_layout();
@@ -934,7 +959,7 @@ JS::NonnullGCPtr<Geometry::DOMRectList> Element::get_client_rects() const
     // 1. If the element on which it was invoked does not have an associated layout box return an empty DOMRectList
     //    object and stop this algorithm.
     if (!layout_node())
-        return Geometry::DOMRectList::create(realm(), move(rects));
+        return Geometry::DOMRectList::create(realm(), {});
 
     // FIXME: 2. If the element has an associated SVG layout box return a DOMRectList object containing a single
     //          DOMRect object that describes the bounding box of the element as defined by the SVG specification,
@@ -947,9 +972,6 @@ JS::NonnullGCPtr<Geometry::DOMRectList> Element::get_client_rects() const
     //          or inline-table include both the table box and the caption box, if any, but not the anonymous container box.
     // FIXME: - Replace each anonymous block box with its child box(es) and repeat this until no anonymous block boxes
     //          are left in the final list.
-    const_cast<Document&>(document()).update_layout();
-    auto navigable = document().navigable();
-    VERIFY(navigable);
     auto viewport_offset = navigable->viewport_scroll_offset();
 
     // NOTE: Make sure CSS transforms are resolved before it is used to calculate the rect position.
@@ -959,6 +981,7 @@ JS::NonnullGCPtr<Geometry::DOMRectList> Element::get_client_rects() const
     CSSPixelPoint scroll_offset;
     auto const* paintable = this->paintable();
 
+    Vector<JS::Handle<Geometry::DOMRect>> rects;
     if (auto const* paintable_box = this->paintable_box()) {
         transform = Gfx::extract_2d_affine_transform(paintable_box->transform());
         for (auto const* containing_block = paintable->containing_block(); !containing_block->is_viewport(); containing_block = containing_block->containing_block()) {
@@ -1102,36 +1125,49 @@ void Element::children_changed()
     set_needs_style_update(true);
 }
 
-void Element::set_pseudo_element_node(Badge<Layout::TreeBuilder>, CSS::Selector::PseudoElement::Type pseudo_element, JS::GCPtr<Layout::Node> pseudo_element_node)
+void Element::set_pseudo_element_node(Badge<Layout::TreeBuilder>, CSS::Selector::PseudoElement::Type pseudo_element, JS::GCPtr<Layout::NodeWithStyle> pseudo_element_node)
 {
-    if (!m_pseudo_element_nodes) {
-        if (!pseudo_element_node)
-            return;
-        m_pseudo_element_nodes = make<PseudoElementLayoutNodes>();
-    }
+    auto existing_pseudo_element = get_pseudo_element(pseudo_element);
+    if (!existing_pseudo_element.has_value() && !pseudo_element_node)
+        return;
 
-    (*m_pseudo_element_nodes)[to_underlying(pseudo_element)] = pseudo_element_node;
+    ensure_pseudo_element(pseudo_element).layout_node = move(pseudo_element_node);
 }
 
-JS::GCPtr<Layout::Node> Element::get_pseudo_element_node(CSS::Selector::PseudoElement::Type pseudo_element) const
+JS::GCPtr<Layout::NodeWithStyle> Element::get_pseudo_element_node(CSS::Selector::PseudoElement::Type pseudo_element) const
 {
-    if (!m_pseudo_element_nodes)
-        return nullptr;
-    return (*m_pseudo_element_nodes)[to_underlying(pseudo_element)];
+    if (auto element_data = get_pseudo_element(pseudo_element); element_data.has_value())
+        return element_data->layout_node;
+    return nullptr;
+}
+
+bool Element::has_pseudo_elements() const
+{
+    if (m_pseudo_element_data) {
+        for (auto& pseudo_element : *m_pseudo_element_data) {
+            if (pseudo_element.layout_node)
+                return true;
+        }
+    }
+    return false;
 }
 
 void Element::clear_pseudo_element_nodes(Badge<Layout::TreeBuilder>)
 {
-    m_pseudo_element_nodes = nullptr;
+    if (m_pseudo_element_data) {
+        for (auto& pseudo_element : *m_pseudo_element_data) {
+            pseudo_element.layout_node = nullptr;
+        }
+    }
 }
 
 void Element::serialize_pseudo_elements_as_json(JsonArraySerializer<StringBuilder>& children_array) const
 {
-    if (!m_pseudo_element_nodes)
+    if (!m_pseudo_element_data)
         return;
-    for (size_t i = 0; i < m_pseudo_element_nodes->size(); ++i) {
-        auto& pseudo_element_node = (*m_pseudo_element_nodes)[i];
-        if (!pseudo_element_node)
+    for (size_t i = 0; i < m_pseudo_element_data->size(); ++i) {
+        auto& pseudo_element = (*m_pseudo_element_data)[i].layout_node;
+        if (!pseudo_element)
             continue;
         auto object = MUST(children_array.add_object());
         MUST(object.add("name"sv, MUST(String::formatted("::{}", CSS::Selector::PseudoElement::name(static_cast<CSS::Selector::PseudoElement::Type>(i))))));
@@ -2173,6 +2209,30 @@ void Element::set_prefix(Optional<FlyString> value)
     m_qualified_name.set_prefix(move(value));
 }
 
+// https://dom.spec.whatwg.org/#locate-a-namespace-prefix
+Optional<String> Element::locate_a_namespace_prefix(Optional<String> const& namespace_) const
+{
+    // 1. If element’s namespace is namespace and its namespace prefix is non-null, then return its namespace prefix.
+    if (this->namespace_uri() == namespace_ && this->prefix().has_value())
+        return this->prefix()->to_string();
+
+    // 2. If element has an attribute whose namespace prefix is "xmlns" and value is namespace, then return element’s first such attribute’s local name.
+    if (auto* attributes = this->attributes()) {
+        for (size_t i = 0; i < attributes->length(); ++i) {
+            auto& attr = *attributes->item(i);
+            if (attr.prefix() == "xmlns" && attr.value() == namespace_)
+                return attr.local_name().to_string();
+        }
+    }
+
+    // 3. If element’s parent element is not null, then return the result of running locate a namespace prefix on that element using namespace.
+    if (auto* parent = this->parent_element())
+        return parent->locate_a_namespace_prefix(namespace_);
+
+    // 4. Return null
+    return {};
+}
+
 void Element::for_each_attribute(Function<void(Attr const&)> callback) const
 {
     for (size_t i = 0; i < m_attributes->length(); ++i)
@@ -2212,11 +2272,33 @@ void Element::set_computed_css_values(RefPtr<CSS::StyleProperties> style)
     computed_css_values_changed();
 }
 
-auto Element::pseudo_element_custom_properties() const -> PseudoElementCustomProperties&
+void Element::set_pseudo_element_computed_css_values(CSS::Selector::PseudoElement::Type pseudo_element, RefPtr<CSS::StyleProperties> style)
 {
-    if (!m_pseudo_element_custom_properties)
-        m_pseudo_element_custom_properties = make<PseudoElementCustomProperties>();
-    return *m_pseudo_element_custom_properties;
+    if (!m_pseudo_element_data && !style)
+        return;
+    ensure_pseudo_element(pseudo_element).computed_css_values = move(style);
+}
+
+RefPtr<CSS::StyleProperties> Element::pseudo_element_computed_css_values(CSS::Selector::PseudoElement::Type type)
+{
+    auto pseudo_element = get_pseudo_element(type);
+    if (pseudo_element.has_value())
+        return pseudo_element->computed_css_values;
+    return nullptr;
+}
+
+Optional<Element::PseudoElement&> Element::get_pseudo_element(CSS::Selector::PseudoElement::Type type) const
+{
+    if (!m_pseudo_element_data)
+        return {};
+    return m_pseudo_element_data->at(to_underlying(type));
+}
+
+Element::PseudoElement& Element::ensure_pseudo_element(CSS::Selector::PseudoElement::Type type) const
+{
+    if (!m_pseudo_element_data)
+        m_pseudo_element_data = make<PseudoElementData>();
+    return m_pseudo_element_data->at(to_underlying(type));
 }
 
 void Element::set_custom_properties(Optional<CSS::Selector::PseudoElement::Type> pseudo_element, HashMap<FlyString, CSS::StyleProperty> custom_properties)
@@ -2225,14 +2307,14 @@ void Element::set_custom_properties(Optional<CSS::Selector::PseudoElement::Type>
         m_custom_properties = move(custom_properties);
         return;
     }
-    pseudo_element_custom_properties()[to_underlying(pseudo_element.value())] = move(custom_properties);
+    ensure_pseudo_element(pseudo_element.value()).custom_properties = move(custom_properties);
 }
 
 HashMap<FlyString, CSS::StyleProperty> const& Element::custom_properties(Optional<CSS::Selector::PseudoElement::Type> pseudo_element) const
 {
     if (!pseudo_element.has_value())
         return m_custom_properties;
-    return pseudo_element_custom_properties()[to_underlying(pseudo_element.value())];
+    return ensure_pseudo_element(pseudo_element.value()).custom_properties;
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-element-scroll
@@ -2342,6 +2424,54 @@ void Element::scroll_by(HTML::ScrollToOptions options)
 
     // 5. Act as if the scroll() method was invoked with options as the only argument.
     scroll(options);
+}
+
+// https://drafts.csswg.org/cssom-view-1/#dom-element-checkvisibility
+bool Element::check_visibility(Optional<CheckVisibilityOptions> options)
+{
+    // NOTE: Ensure that layout is up-to-date before looking at metrics.
+    document().update_layout();
+
+    // 1. If this does not have an associated box, return false.
+    if (!paintable_box())
+        return false;
+
+    // 2. If an ancestor of this in the flat tree has content-visibility: hidden, return false.
+    for (auto* element = parent_element(); element; element = element->parent_element()) {
+        if (element->computed_css_values()->content_visibility() == CSS::ContentVisibility::Hidden)
+            return false;
+    }
+
+    // AD-HOC: Since the rest of the steps use the options, we can return early if we haven't been given any options.
+    if (!options.has_value())
+        return true;
+
+    // 3. If either the opacityProperty or the checkOpacity dictionary members of options are true, and this, or an ancestor of this in the flat tree, has a computed opacity value of 0, return false.
+    if (options->opacity_property || options->check_opacity) {
+        for (auto* element = this; element; element = element->parent_element()) {
+            if (element->computed_css_values()->opacity() == 0.0f)
+                return false;
+        }
+    }
+
+    // 4. If either the visibilityProperty or the checkVisibilityCSS dictionary members of options are true, and this is invisible, return false.
+    if (options->visibility_property || options->check_visibility_css) {
+        if (computed_css_values()->visibility() == CSS::Visibility::Hidden)
+            return false;
+    }
+
+    // 5. If the contentVisibilityAuto dictionary member of options is true and an ancestor of this in the flat tree skips its contents due to content-visibility: auto, return false.
+    // FIXME: Currently we do not skip any content if content-visibility is auto: https://drafts.csswg.org/css-contain-2/#proximity-to-the-viewport
+    auto const skipped_contents_due_to_content_visibility_auto = false;
+    if (options->content_visibility_auto && skipped_contents_due_to_content_visibility_auto) {
+        for (auto* element = this; element; element = element->parent_element()) {
+            if (element->computed_css_values()->content_visibility() == CSS::ContentVisibility::Auto)
+                return false;
+        }
+    }
+
+    // 6. Return true.
+    return true;
 }
 
 bool Element::id_reference_exists(String const& id_reference) const
@@ -2663,6 +2793,112 @@ WebIDL::ExceptionOr<void> Element::set_html_unsafe(StringView html)
     TRY(target->unsafely_set_html(*this, html));
 
     return {};
+}
+
+Optional<CSS::CountersSet const&> Element::counters_set()
+{
+    if (!m_counters_set)
+        return {};
+    return *m_counters_set;
+}
+
+CSS::CountersSet& Element::ensure_counters_set()
+{
+    if (!m_counters_set)
+        m_counters_set = make<CSS::CountersSet>();
+    return *m_counters_set;
+}
+
+// https://drafts.csswg.org/css-lists-3/#auto-numbering
+void Element::resolve_counters(CSS::StyleProperties& style)
+{
+    // Resolving counter values on a given element is a multi-step process:
+
+    // 1. Existing counters are inherited from previous elements.
+    inherit_counters();
+
+    // https://drafts.csswg.org/css-lists-3/#counters-without-boxes
+    // An element that does not generate a box (for example, an element with display set to none,
+    // or a pseudo-element with content set to none) cannot set, reset, or increment a counter.
+    // The counter properties are still valid on such an element, but they must have no effect.
+    if (style.display().is_none())
+        return;
+
+    // 2. New counters are instantiated (counter-reset).
+    auto counter_reset = style.counter_data(CSS::PropertyID::CounterReset);
+    for (auto const& counter : counter_reset)
+        ensure_counters_set().instantiate_a_counter(counter.name, unique_id(), counter.is_reversed, counter.value);
+
+    // 3. Counter values are incremented (counter-increment).
+    auto counter_increment = style.counter_data(CSS::PropertyID::CounterIncrement);
+    for (auto const& counter : counter_increment)
+        ensure_counters_set().increment_a_counter(counter.name, unique_id(), *counter.value);
+
+    // 4. Counter values are explicitly set (counter-set).
+    auto counter_set = style.counter_data(CSS::PropertyID::CounterSet);
+    for (auto const& counter : counter_set)
+        ensure_counters_set().set_a_counter(counter.name, unique_id(), *counter.value);
+
+    // 5. Counter values are used (counter()/counters()).
+    // NOTE: This happens when we process the `content` property.
+}
+
+// https://drafts.csswg.org/css-lists-3/#inherit-counters
+void Element::inherit_counters()
+{
+    // 1. If element is the root of its document tree, the element has an initially-empty CSS counters set.
+    //    Return.
+    auto* parent = parent_element();
+    if (parent == nullptr) {
+        // NOTE: We represent an empty counters set with `m_counters_set = nullptr`.
+        m_counters_set = nullptr;
+        return;
+    }
+
+    // 2. Let element counters, representing element’s own CSS counters set, be a copy of the CSS counters
+    //    set of element’s parent element.
+    OwnPtr<CSS::CountersSet> element_counters;
+    // OPTIMIZATION: If parent has a set, we create a copy. Otherwise, we avoid allocating one until we need
+    // to add something to it.
+    auto ensure_element_counters = [&]() {
+        if (!element_counters)
+            element_counters = make<CSS::CountersSet>();
+    };
+    if (parent->has_non_empty_counters_set()) {
+        element_counters = make<CSS::CountersSet>();
+        *element_counters = *parent_element()->counters_set();
+    }
+
+    // 3. Let sibling counters be the CSS counters set of element’s preceding sibling (if it has one),
+    //    or an empty CSS counters set otherwise.
+    //    For each counter of sibling counters, if element counters does not already contain a counter with
+    //    the same name, append a copy of counter to element counters.
+    if (auto* const sibling = previous_sibling_of_type<Element>(); sibling && sibling->has_non_empty_counters_set()) {
+        auto& sibling_counters = sibling->counters_set().release_value();
+        ensure_element_counters();
+        for (auto const& counter : sibling_counters.counters()) {
+            if (!element_counters->last_counter_with_name(counter.name).has_value())
+                element_counters->append_copy(counter);
+        }
+    }
+
+    // 4. Let value source be the CSS counters set of the element immediately preceding element in tree order.
+    //    For each source counter of value source, if element counters contains a counter with the same name
+    //    and creator, then set the value of that counter to source counter’s value.
+    if (auto* const previous = previous_element_in_pre_order(); previous && previous->has_non_empty_counters_set()) {
+        // NOTE: If element_counters is empty (AKA null) then we can skip this since nothing will match.
+        if (element_counters) {
+            auto& value_source = previous->counters_set().release_value();
+            for (auto const& source_counter : value_source.counters()) {
+                auto maybe_existing_counter = element_counters->counter_with_same_name_and_creator(source_counter.name, source_counter.originating_element_id);
+                if (maybe_existing_counter.has_value())
+                    maybe_existing_counter->value = source_counter.value;
+            }
+        }
+    }
+
+    VERIFY(!element_counters || !element_counters->is_empty());
+    m_counters_set = move(element_counters);
 }
 
 }

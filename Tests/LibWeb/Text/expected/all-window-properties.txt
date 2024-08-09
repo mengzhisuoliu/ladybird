@@ -12,7 +12,9 @@ ArrayBuffer
 Attr
 Audio
 AudioBuffer
+AudioBufferSourceNode
 AudioContext
+AudioDestinationNode
 AudioNode
 AudioParam
 AudioScheduledSourceNode
@@ -22,6 +24,7 @@ BaseAudioContext
 BigInt
 BigInt64Array
 BigUint64Array
+BiquadFilterNode
 Blob
 Boolean
 BroadcastChannel
@@ -67,6 +70,7 @@ DOMQuad
 DOMRect
 DOMRectList
 DOMRectReadOnly
+DOMStringList
 DOMStringMap
 DOMTokenList
 DataTransfer
@@ -233,6 +237,7 @@ Performance
 PerformanceEntry
 PerformanceMark
 PerformanceMeasure
+PerformanceNavigation
 PerformanceObserver
 PerformanceObserverEntryList
 PerformanceTiming

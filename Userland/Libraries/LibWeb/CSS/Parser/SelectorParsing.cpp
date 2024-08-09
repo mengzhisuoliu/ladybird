@@ -32,6 +32,34 @@ Optional<SelectorList> Parser::parse_as_relative_selector(SelectorParsingMode pa
     return {};
 }
 
+Optional<Selector::PseudoElement> Parser::parse_as_pseudo_element_selector()
+{
+    // FIXME: This is quite janky. Selector parsing is not at all designed to allow parsing just a single part of a selector.
+    //        So, this code parses a whole selector, then rejects it if it's not a single pseudo-element simple selector.
+    //        Come back and fix this, future Sam!
+    auto maybe_selector_list = parse_a_selector_list(m_token_stream, SelectorType::Standalone, SelectorParsingMode::Standard);
+    if (maybe_selector_list.is_error())
+        return {};
+    auto& selector_list = maybe_selector_list.value();
+
+    if (selector_list.size() != 1)
+        return {};
+    auto& selector = selector_list.first();
+
+    if (selector->compound_selectors().size() != 1)
+        return {};
+    auto& first_compound_selector = selector->compound_selectors().first();
+
+    if (first_compound_selector.simple_selectors.size() != 1)
+        return {};
+    auto& simple_selector = first_compound_selector.simple_selectors.first();
+
+    if (simple_selector.type != Selector::SimpleSelector::Type::PseudoElement)
+        return {};
+
+    return simple_selector.pseudo_element();
+}
+
 template<typename T>
 Parser::ParseErrorOr<SelectorList> Parser::parse_a_selector_list(TokenStream<T>& tokens, SelectorType mode, SelectorParsingMode parsing_mode)
 {
@@ -506,7 +534,10 @@ Parser::ParseErrorOr<Selector::SimpleSelector> Parser::parse_pseudo_simple_selec
                 return ParseError::SyntaxError;
             }
 
-            Vector compound_selectors { compound_selector_or_error.release_value().release_value() };
+            auto compound_selector = compound_selector_or_error.release_value().release_value();
+            compound_selector.combinator = Selector::Combinator::None;
+
+            Vector compound_selectors { move(compound_selector) };
             auto selector = Selector::create(move(compound_selectors));
 
             return Selector::SimpleSelector {

@@ -16,6 +16,7 @@
 #include <AK/WeakPtr.h>
 #include <LibCore/DateTime.h>
 #include <LibCore/Forward.h>
+#include <LibJS/Console.h>
 #include <LibJS/Forward.h>
 #include <LibURL/URL.h>
 #include <LibWeb/CSS/CSSStyleSheet.h>
@@ -29,10 +30,10 @@
 #include <LibWeb/HTML/HTMLScriptElement.h>
 #include <LibWeb/HTML/History.h>
 #include <LibWeb/HTML/LazyLoadingElement.h>
+#include <LibWeb/HTML/NavigationType.h>
 #include <LibWeb/HTML/Origin.h>
 #include <LibWeb/HTML/SandboxingFlagSet.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
-#include <LibWeb/HTML/SharedImageRequest.h>
 #include <LibWeb/HTML/VisibilityState.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 #include <LibWeb/WebIDL/ObservableArray.h>
@@ -92,9 +93,15 @@ public:
         HTML
     };
 
+    enum class TemporaryDocumentForFragmentParsing {
+        No,
+        Yes,
+    };
+
     static WebIDL::ExceptionOr<JS::NonnullGCPtr<Document>> create_and_initialize(Type, String content_type, HTML::NavigationParams const&);
 
     [[nodiscard]] static JS::NonnullGCPtr<Document> create(JS::Realm&, URL::URL const& url = "about:blank"sv);
+    [[nodiscard]] static JS::NonnullGCPtr<Document> create_for_fragment_parsing(JS::Realm&);
     static WebIDL::ExceptionOr<JS::NonnullGCPtr<Document>> construct_impl(JS::Realm&);
     virtual ~Document() override;
 
@@ -247,8 +254,7 @@ public:
     void schedule_style_update();
     void schedule_layout_update();
 
-    JS::NonnullGCPtr<HTMLCollection> get_elements_by_name(FlyString const&);
-    JS::NonnullGCPtr<HTMLCollection> get_elements_by_class_name(StringView);
+    JS::NonnullGCPtr<NodeList> get_elements_by_name(FlyString const&);
 
     JS::NonnullGCPtr<HTMLCollection> applets();
     JS::NonnullGCPtr<HTMLCollection> anchors();
@@ -286,7 +292,7 @@ public:
     WebIDL::ExceptionOr<JS::NonnullGCPtr<Event>> create_event(StringView interface);
     JS::NonnullGCPtr<Range> create_range();
 
-    void set_pending_parsing_blocking_script(Badge<HTML::HTMLScriptElement>, HTML::HTMLScriptElement*);
+    void set_pending_parsing_blocking_script(HTML::HTMLScriptElement*);
     HTML::HTMLScriptElement* pending_parsing_blocking_script() { return m_pending_parsing_blocking_script.ptr(); }
     JS::NonnullGCPtr<HTML::HTMLScriptElement> take_pending_parsing_blocking_script(Badge<HTML::HTMLParser>);
 
@@ -447,8 +453,7 @@ public:
     void set_parser(Badge<HTML::HTMLParser>, HTML::HTMLParser&);
     void detach_parser(Badge<HTML::HTMLParser>);
 
-    void set_is_temporary_document_for_fragment_parsing(Badge<HTML::HTMLParser>) { m_temporary_document_for_fragment_parsing = true; }
-    [[nodiscard]] bool is_temporary_document_for_fragment_parsing() const { return m_temporary_document_for_fragment_parsing; }
+    [[nodiscard]] bool is_temporary_document_for_fragment_parsing() const { return m_temporary_document_for_fragment_parsing == TemporaryDocumentForFragmentParsing::Yes; }
 
     static bool is_valid_name(String const&);
 
@@ -593,9 +598,9 @@ public:
 
     HTML::SourceSnapshotParams snapshot_source_snapshot_params() const;
 
-    void update_for_history_step_application(JS::NonnullGCPtr<HTML::SessionHistoryEntry>, bool do_not_reactivate, size_t script_history_length, size_t script_history_index, Optional<Vector<JS::NonnullGCPtr<HTML::SessionHistoryEntry>>> entries_for_navigation_api = {}, bool update_navigation_api = true);
+    void update_for_history_step_application(JS::NonnullGCPtr<HTML::SessionHistoryEntry>, bool do_not_reactivate, size_t script_history_length, size_t script_history_index, Optional<Bindings::NavigationType> navigation_type, Optional<Vector<JS::NonnullGCPtr<HTML::SessionHistoryEntry>>> entries_for_navigation_api = {}, Optional<JS::NonnullGCPtr<HTML::SessionHistoryEntry>> previous_entry_for_activation = {}, bool update_navigation_api = true);
 
-    HashMap<URL::URL, JS::GCPtr<HTML::SharedImageRequest>>& shared_image_requests();
+    HashMap<URL::URL, JS::GCPtr<HTML::SharedResourceRequest>>& shared_resource_requests();
 
     void restore_the_history_object_state(JS::NonnullGCPtr<HTML::SessionHistoryEntry> entry);
 
@@ -646,7 +651,7 @@ public:
     void set_needs_to_resolve_paint_only_properties() { m_needs_to_resolve_paint_only_properties = true; }
     void set_needs_animated_style_update() { m_needs_animated_style_update = true; }
 
-    virtual WebIDL::ExceptionOr<JS::Value> named_item_value(FlyString const& name) const override;
+    virtual JS::Value named_item_value(FlyString const& name) const override;
     virtual Vector<FlyString> supported_property_names() const override;
     Vector<JS::NonnullGCPtr<DOM::Element>> const& potentially_named_elements() const { return m_potentially_named_elements; }
 
@@ -679,12 +684,27 @@ public:
     void parse_html_from_a_string(StringView);
     static JS::NonnullGCPtr<Document> parse_html_unsafe(JS::VM&, StringView);
 
+    void set_console_client(JS::GCPtr<JS::ConsoleClient> console_client) { m_console_client = console_client; }
+    JS::GCPtr<JS::ConsoleClient> console_client() const { return m_console_client; }
+
+    JS::GCPtr<DOM::Position> cursor_position() const { return m_cursor_position; }
+    void set_cursor_position(JS::NonnullGCPtr<DOM::Position>);
+    bool increment_cursor_position_offset();
+    bool decrement_cursor_position_offset();
+
+    bool cursor_blink_state() const { return m_cursor_blink_state; }
+
+    void user_did_edit_document_text(Badge<EditEventHandler>);
+    // Cached pointer to the last known node navigable.
+    // If this document is currently the "active document" of the cached navigable, the cache is still valid.
+    JS::GCPtr<HTML::Navigable> cached_navigable();
+    void set_cached_navigable(JS::GCPtr<HTML::Navigable>);
+
 protected:
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
-    virtual void finalize() override;
 
-    Document(JS::Realm&, URL::URL const&);
+    Document(JS::Realm&, URL::URL const&, TemporaryDocumentForFragmentParsing = TemporaryDocumentForFragmentParsing::No);
 
 private:
     // ^HTML::GlobalEventHandlers
@@ -706,6 +726,10 @@ private:
     Element* find_a_potential_indicated_element(FlyString const& fragment) const;
 
     void dispatch_events_for_animation_if_necessary(JS::NonnullGCPtr<Animations::Animation>);
+
+    void reset_cursor_blink_cycle();
+
+    void make_unsalvageable(String reason);
 
     JS::NonnullGCPtr<Page> m_page;
     OwnPtr<CSS::StyleComputer> m_style_computer;
@@ -889,12 +913,12 @@ private:
 
     RefPtr<Core::Timer> m_active_refresh_timer;
 
-    bool m_temporary_document_for_fragment_parsing { false };
+    TemporaryDocumentForFragmentParsing m_temporary_document_for_fragment_parsing { TemporaryDocumentForFragmentParsing::No };
 
     // https://html.spec.whatwg.org/multipage/browsing-the-web.html#latest-entry
     JS::GCPtr<HTML::SessionHistoryEntry> m_latest_entry;
 
-    HashMap<URL::URL, JS::GCPtr<HTML::SharedImageRequest>> m_shared_image_requests;
+    HashMap<URL::URL, JS::GCPtr<HTML::SharedResourceRequest>> m_shared_resource_requests;
 
     // https://www.w3.org/TR/web-animations-1/#timeline-associated-with-a-document
     HashTable<JS::NonnullGCPtr<Animations::AnimationTimeline>> m_associated_animation_timelines;
@@ -940,6 +964,15 @@ private:
 
     // https://dom.spec.whatwg.org/#document-allow-declarative-shadow-roots
     bool m_allow_declarative_shadow_roots { false };
+
+    JS::GCPtr<JS::ConsoleClient> m_console_client;
+
+    JS::GCPtr<DOM::Position> m_cursor_position;
+    RefPtr<Core::Timer> m_cursor_blink_timer;
+    bool m_cursor_blink_state { false };
+
+    // NOTE: This is WeakPtr, not GCPtr, on purpose. We don't want the document to keep some old detached navigable alive.
+    WeakPtr<HTML::Navigable> m_cached_navigable;
 };
 
 template<>

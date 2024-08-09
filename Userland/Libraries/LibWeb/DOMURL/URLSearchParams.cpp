@@ -9,6 +9,7 @@
 #include <AK/StringBuilder.h>
 #include <AK/Utf8View.h>
 #include <LibTextCodec/Decoder.h>
+#include <LibTextCodec/Encoder.h>
 #include <LibURL/Parser.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/Intrinsics.h>
@@ -47,6 +48,12 @@ ErrorOr<String> url_encode(Vector<QueryParam> const& tuples, StringView encoding
     // 1. Set encoding to the result of getting an output encoding from encoding.
     encoding = TextCodec::get_output_encoding(encoding);
 
+    auto encoder = TextCodec::encoder_for(encoding);
+    if (!encoder.has_value()) {
+        // NOTE: Fallback to default utf-8 encoder.
+        encoder = TextCodec::encoder_for("utf-8"sv);
+    }
+
     // 2. Let output be the empty string.
     StringBuilder output;
 
@@ -55,12 +62,10 @@ ErrorOr<String> url_encode(Vector<QueryParam> const& tuples, StringView encoding
         // 1. Assert: tuple’s name and tuple’s value are scalar value strings.
 
         // 2. Let name be the result of running percent-encode after encoding with encoding, tuple’s name, the application/x-www-form-urlencoded percent-encode set, and true.
-        // FIXME: URL::Parser does not currently implement encoding.
-        auto name = TRY(URL::Parser::percent_encode_after_encoding(tuple.name, URL::PercentEncodeSet::ApplicationXWWWFormUrlencoded, true));
+        auto name = TRY(URL::Parser::percent_encode_after_encoding(*encoder, tuple.name, URL::PercentEncodeSet::ApplicationXWWWFormUrlencoded, true));
 
         // 3. Let value be the result of running percent-encode after encoding with encoding, tuple’s value, the application/x-www-form-urlencoded percent-encode set, and true.
-        // FIXME: URL::Parser does not currently implement encoding.
-        auto value = TRY(URL::Parser::percent_encode_after_encoding(tuple.value, URL::PercentEncodeSet::ApplicationXWWWFormUrlencoded, true));
+        auto value = TRY(URL::Parser::percent_encode_after_encoding(*encoder, tuple.value, URL::PercentEncodeSet::ApplicationXWWWFormUrlencoded, true));
 
         // 4. If output is not the empty string, then append U+0026 (&) to output.
         if (!output.is_empty())
@@ -124,6 +129,14 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<URLSearchParams>> URLSearchParams::create(J
     return realm.heap().allocate<URLSearchParams>(realm, realm, move(list));
 }
 
+// https://url.spec.whatwg.org/#urlsearchparams-initialize
+WebIDL::ExceptionOr<JS::NonnullGCPtr<URLSearchParams>> URLSearchParams::create(JS::Realm& realm, StringView init)
+{
+    // NOTE: We skip the other steps since we know it is a string at this point.
+    // b. Set query’s list to the result of parsing init.
+    return URLSearchParams::create(realm, MUST(url_decode(init)));
+}
+
 // https://url.spec.whatwg.org/#dom-urlsearchparams-urlsearchparams
 // https://url.spec.whatwg.org/#urlsearchparams-initialize
 WebIDL::ExceptionOr<JS::NonnullGCPtr<URLSearchParams>> URLSearchParams::construct_impl(JS::Realm& realm, Variant<Vector<Vector<String>>, OrderedHashMap<String, String>, String> const& init)
@@ -179,7 +192,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<URLSearchParams>> URLSearchParams::construc
     auto stripped_init = init_string_view.substring_view(init_string_view.starts_with('?'));
 
     // b. Set query’s list to the result of parsing init.
-    return URLSearchParams::create(realm, TRY_OR_THROW_OOM(vm, url_decode(stripped_init)));
+    return URLSearchParams::create(realm, stripped_init);
 }
 
 // https://url.spec.whatwg.org/#dom-urlsearchparams-size

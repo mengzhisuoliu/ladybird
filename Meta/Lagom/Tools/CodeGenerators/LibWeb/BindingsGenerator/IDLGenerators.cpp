@@ -34,6 +34,7 @@ static bool is_platform_object(Type const& type)
         "AnimationEffect"sv,
         "AnimationTimeline"sv,
         "Attr"sv,
+        "AudioBuffer"sv,
         "AudioNode"sv,
         "AudioParam"sv,
         "AudioScheduledSourceNode"sv,
@@ -73,6 +74,7 @@ static bool is_platform_object(Type const& type)
         "Path2D"sv,
         "PerformanceEntry"sv,
         "PerformanceMark"sv,
+        "PerformanceNavigation"sv,
         "PeriodicWave"sv,
         "PointerEvent"sv,
         "ReadableStreamBYOBReader"sv,
@@ -273,11 +275,8 @@ static void generate_include_for_iterator(auto& generator, auto& iterator_path)
 {
     auto iterator_generator = generator.fork();
     iterator_generator.set("iterator_class.path", iterator_path);
-    // FIXME: These may or may not exist, because REASONS.
     iterator_generator.append(R"~~~(
-//#if __has_include(<LibWeb/@iterator_class.path@.h>)
 #   include <LibWeb/@iterator_class.path@.h>
-//#endif
 )~~~");
 }
 
@@ -333,6 +332,11 @@ static void emit_includes_for_all_imports(auto& interface, auto& generator, bool
 template<typename ParameterType>
 static void generate_to_string(SourceGenerator& scoped_generator, ParameterType const& parameter, bool variadic, bool optional, Optional<ByteString> const& optional_default_value)
 {
+    if (parameter.type->name() == "USVString")
+        scoped_generator.set("to_string", "to_well_formed_string"sv);
+    else
+        scoped_generator.set("to_string", "to_string"sv);
+
     if (variadic) {
         scoped_generator.append(R"~~~(
     Vector<String> @cpp_name@;
@@ -341,7 +345,7 @@ static void generate_to_string(SourceGenerator& scoped_generator, ParameterType 
         @cpp_name@.ensure_capacity(vm.argument_count() - @js_suffix@);
 
         for (size_t i = @js_suffix@; i < vm.argument_count(); ++i) {
-            auto to_string_result = TRY(vm.argument(i).to_string(vm));
+            auto to_string_result = TRY(vm.argument(i).@to_string@(vm));
             @cpp_name@.unchecked_append(move(to_string_result));
         }
     }
@@ -351,14 +355,14 @@ static void generate_to_string(SourceGenerator& scoped_generator, ParameterType 
             scoped_generator.append(R"~~~(
     @string_type@ @cpp_name@;
     if (!@legacy_null_to_empty_string@ || !@js_name@@js_suffix@.is_null()) {
-        @cpp_name@ = TRY(@js_name@@js_suffix@.to_string(vm));
+        @cpp_name@ = TRY(@js_name@@js_suffix@.@to_string@(vm));
     }
 )~~~");
         } else {
             scoped_generator.append(R"~~~(
     Optional<@string_type@> @cpp_name@;
     if (!@js_name@@js_suffix@.is_nullish())
-        @cpp_name@ = TRY(@js_name@@js_suffix@.to_string(vm));
+        @cpp_name@ = TRY(@js_name@@js_suffix@.@to_string@(vm));
 )~~~");
         }
     } else {
@@ -376,7 +380,7 @@ static void generate_to_string(SourceGenerator& scoped_generator, ParameterType 
         scoped_generator.append(R"~~~(
     if (!@js_name@@js_suffix@.is_undefined()) {
         if (!@legacy_null_to_empty_string@ || !@js_name@@js_suffix@.is_null())
-            @cpp_name@ = TRY(@js_name@@js_suffix@.to_string(vm));
+            @cpp_name@ = TRY(@js_name@@js_suffix@.@to_string@(vm));
     })~~~");
         if (!may_be_null) {
             scoped_generator.append(R"~~~( else {
@@ -387,6 +391,41 @@ static void generate_to_string(SourceGenerator& scoped_generator, ParameterType 
             scoped_generator.append(R"~~~(
 )~~~");
         }
+    }
+}
+
+static void generate_from_integral(SourceGenerator& scoped_generator, IDL::Type const& type)
+{
+    struct TypeMap {
+        StringView idl_type;
+        StringView cpp_type;
+    };
+    static constexpr auto idl_type_map = to_array<TypeMap>({
+        { "byte"sv, "WebIDL::Byte"sv },
+        { "octet"sv, "WebIDL::Octet"sv },
+        { "short"sv, "WebIDL::Short"sv },
+        { "unsigned short"sv, "WebIDL::UnsignedShort"sv },
+        { "long"sv, "WebIDL::Long"sv },
+        { "unsigned long"sv, "WebIDL::UnsignedLong"sv },
+        { "long long"sv, "double"sv },
+        { "unsigned long long"sv, "double"sv },
+    });
+
+    auto it = find_if(idl_type_map.begin(), idl_type_map.end(), [&](auto const& entry) {
+        return entry.idl_type == type.name();
+    });
+
+    VERIFY(it != idl_type_map.end());
+    scoped_generator.set("cpp_type"sv, it->cpp_type);
+
+    if (type.is_nullable()) {
+        scoped_generator.append(R"~~~(
+    @result_expression@ JS::Value(static_cast<@cpp_type@>(@value@.release_value()));
+)~~~");
+    } else {
+        scoped_generator.append(R"~~~(
+    @result_expression@ JS::Value(static_cast<@cpp_type@>(@value@));
+)~~~");
     }
 }
 
@@ -1743,22 +1782,8 @@ static void generate_wrap_statement(SourceGenerator& generator, ByteString const
     @result_expression@ JS::Value(@value@);
 )~~~");
         }
-    } else if (type.name() == "short" || type.name() == "long" || type.name() == "unsigned short") {
-        scoped_generator.append(R"~~~(
-    @result_expression@ JS::Value((i32)@value@);
-)~~~");
-    } else if (type.name() == "unsigned long") {
-        scoped_generator.append(R"~~~(
-    @result_expression@ JS::Value((u32)@value@);
-)~~~");
-    } else if (type.name() == "long long") {
-        scoped_generator.append(R"~~~(
-    @result_expression@ JS::Value((double)@value@);
-)~~~");
-    } else if (type.name() == "unsigned long long") {
-        scoped_generator.append(R"~~~(
-    @result_expression@ JS::Value((double)@value@);
-)~~~");
+    } else if (type.is_integer()) {
+        generate_from_integral(scoped_generator, type);
     } else if (type.name() == "Location" || type.name() == "Promise" || type.name() == "Uint8Array" || type.name() == "Uint8ClampedArray" || type.name() == "any") {
         scoped_generator.append(R"~~~(
     @result_expression@ @value@;
@@ -2523,7 +2548,7 @@ JS::ThrowCompletionOr<JS::NonnullGCPtr<JS::Object>> @constructor_class@::constru
     auto prototype = TRY(new_target.get(vm.names.prototype));
 
     // 3.3. If Type(prototype) is not Object, then:
-    if (!prototype.is_object()) {    
+    if (!prototype.is_object()) {
         // 1. Let targetRealm be ? GetFunctionRealm(newTarget).
         auto* target_realm = TRY(JS::get_function_realm(vm, new_target));
 
@@ -3014,7 +3039,6 @@ void @named_properties_class@::initialize(JS::Realm& realm)
 // https://webidl.spec.whatwg.org/#named-properties-object-getownproperty
 JS::ThrowCompletionOr<Optional<JS::PropertyDescriptor>> @named_properties_class@::internal_get_own_property(JS::PropertyKey const& property_name) const
 {
-    auto& vm = this->vm();
     auto& realm = this->realm();
 
     // 1. Let A be the interface for the named properties object O.
@@ -3032,7 +3056,7 @@ JS::ThrowCompletionOr<Optional<JS::PropertyDescriptor>> @named_properties_class@
         // 2. Let value be an uninitialized variable.
         // 3. If operation was defined without an identifier, then set value to the result of performing the steps listed in the interface description to determine the value of a named property with P as the name.
         // 4. Otherwise, operation was defined with an identifier. Set value to the result of performing the method steps of operation with « P » as the only argument value.
-        auto value = TRY(throw_dom_exception_if_needed(vm, [&] { return object.named_item_value(property_name_string); }));
+        auto value = object.named_item_value(property_name_string);
 
         // 5. Let desc be a newly created Property Descriptor with no fields.
         JS::PropertyDescriptor descriptor;
@@ -4361,47 +4385,6 @@ void generate_constructor_implementation(IDL::Interface const& interface, String
 #include <LibWeb/Bindings/@prototype_class@.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#if __has_include(<LibWeb/Animations/@name@.h>)
-#    include <LibWeb/Animations/@name@.h>
-#elif __has_include(<LibWeb/Crypto/@name@.h>)
-#    include <LibWeb/Crypto/@name@.h>
-#elif __has_include(<LibWeb/CSS/@name@.h>)
-#    include <LibWeb/CSS/@name@.h>
-#elif __has_include(<LibWeb/DOM/@name@.h>)
-#    include <LibWeb/DOM/@name@.h>
-#elif __has_include(<LibWeb/Encoding/@name@.h>)
-#    include <LibWeb/Encoding/@name@.h>
-#elif __has_include(<LibWeb/Fetch/@name@.h>)
-#    include <LibWeb/Fetch/@name@.h>
-#elif __has_include(<LibWeb/FileAPI/@name@.h>)
-#    include <LibWeb/FileAPI/@name@.h>
-#elif __has_include(<LibWeb/Geometry/@name@.h>)
-#    include <LibWeb/Geometry/@name@.h>
-#elif __has_include(<LibWeb/HTML/@name@.h>)
-#    include <LibWeb/HTML/@name@.h>
-#elif __has_include(<LibWeb/UIEvents/@name@.h>)
-#    include <LibWeb/UIEvents/@name@.h>
-#elif __has_include(<LibWeb/HighResolutionTime/@name@.h>)
-#    include <LibWeb/HighResolutionTime/@name@.h>
-#elif __has_include(<LibWeb/IntersectionObserver/@name@.h>)
-#    include <LibWeb/IntersectionObserver/@name@.h>
-#elif __has_include(<LibWeb/NavigationTiming/@name@.h>)
-#    include <LibWeb/NavigationTiming/@name@.h>
-#elif __has_include(<LibWeb/RequestIdleCallback/@name@.h>)
-#    include <LibWeb/RequestIdleCallback/@name@.h>
-#elif __has_include(<LibWeb/ResizeObserver/@name@.h>)
-#    include <LibWeb/ResizeObserver/@name@.h>
-#elif __has_include(<LibWeb/SVG/@name@.h>)
-#    include <LibWeb/SVG/@name@.h>
-#elif __has_include(<LibWeb/Selection/@name@.h>)
-#    include <LibWeb/Selection/@name@.h>
-#elif __has_include(<LibWeb/WebSockets/@name@.h>)
-#    include <LibWeb/WebSockets/@name@.h>
-#elif __has_include(<LibWeb/XHR/@name@.h>)
-#    include <LibWeb/XHR/@name@.h>
-#elif __has_include(<LibWeb/DOMURL/@name@.h>)
-#    include <LibWeb/DOMURL/@name@.h>
-#endif
 #include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 #include <LibWeb/WebIDL/Buffers.h>
@@ -4796,10 +4779,6 @@ void generate_iterator_prototype_implementation(IDL::Interface const& interface,
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/WebIDL/Tracing.h>
-
-#if __has_include(<LibWeb/@possible_include_path@.h>)
-#    include <LibWeb/@possible_include_path@.h>
-#endif
 )~~~");
 
     emit_includes_for_all_imports(interface, generator, true);

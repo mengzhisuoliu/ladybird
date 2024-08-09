@@ -195,7 +195,20 @@ inspector.createPropertyTables = (computedStyle, resolvedStyle, customProperties
         newTable.setAttribute("id", tableID);
 
         Object.keys(properties)
-            .sort()
+            .sort((a, b) => {
+                let baseResult = a.localeCompare(b);
+                // Manually move vendor-prefixed items after non-prefixed ones.
+                if (a[0] === "-") {
+                    if (b[0] === "-") {
+                        return baseResult;
+                    }
+                    return 1;
+                }
+                if (b[0] === "-") {
+                    return -1;
+                }
+                return baseResult;
+            })
             .forEach(name => {
                 let row = newTable.insertRow();
 
@@ -212,6 +225,47 @@ inspector.createPropertyTables = (computedStyle, resolvedStyle, customProperties
     createPropertyTable("computed-style-table", JSON.parse(computedStyle));
     createPropertyTable("resolved-style-table", JSON.parse(resolvedStyle));
     createPropertyTable("custom-properties-table", JSON.parse(customProperties));
+};
+
+inspector.createFontList = fonts => {
+    let fontsJSON = JSON.parse(fonts);
+    if (!Array.isArray(fontsJSON)) return;
+
+    const listId = "fonts-list";
+    let oldList = document.getElementById(listId);
+
+    let newList = document.createElement("div");
+    newList.setAttribute("id", listId);
+    const createFontEntry = (listContainer, font) => {
+        let fontEntry = document.createElement("div");
+        fontEntry.classList.add("font");
+
+        let fontName = document.createElement("div");
+        fontName.classList.add("name");
+        fontName.innerText = font.name;
+        fontEntry.appendChild(fontName);
+
+        let fontSize = document.createElement("div");
+        fontSize.classList.add("size");
+        fontSize.innerText = font.size;
+        fontEntry.appendChild(fontSize);
+
+        let fontWeight = document.createElement("div");
+        fontWeight.classList.add("Weight");
+        fontWeight.innerText = font.weight;
+        fontEntry.appendChild(fontWeight);
+
+        let fontVariant = document.createElement("div");
+        fontVariant.classList.add("Variant");
+        fontVariant.innerText = font.variant;
+        fontEntry.appendChild(fontVariant);
+
+        listContainer.appendChild(fontEntry);
+    };
+
+    for (let font of fontsJSON) createFontEntry(newList, font);
+
+    oldList.parentNode.replaceChild(newList, oldList);
 };
 
 const inspectDOMNode = domNode => {

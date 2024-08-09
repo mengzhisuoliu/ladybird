@@ -33,6 +33,8 @@
 
 namespace Web::Painting {
 
+class DisplayList;
+
 struct DrawGlyphRun {
     NonnullRefPtr<Gfx::GlyphRun> glyph_run;
     Color color;
@@ -48,7 +50,6 @@ struct DrawGlyphRun {
 struct FillRect {
     Gfx::IntRect rect;
     Color color;
-    Vector<Gfx::Path> clip_paths;
 
     [[nodiscard]] Gfx::IntRect bounding_rect() const { return rect; }
     void translate_by(Gfx::IntPoint const& offset) { rect.translate_by(offset); }
@@ -69,9 +70,23 @@ struct DrawScaledImmutableBitmap {
     NonnullRefPtr<Gfx::ImmutableBitmap> bitmap;
     Gfx::IntRect src_rect;
     Gfx::ScalingMode scaling_mode;
-    Vector<Gfx::Path> clip_paths;
 
     [[nodiscard]] Gfx::IntRect bounding_rect() const { return dst_rect; }
+    void translate_by(Gfx::IntPoint const& offset) { dst_rect.translate_by(offset); }
+};
+
+struct DrawRepeatedImmutableBitmap {
+    struct Repeat {
+        bool x { false };
+        bool y { false };
+    };
+
+    Gfx::IntRect dst_rect;
+    Gfx::IntRect clip_rect;
+    NonnullRefPtr<Gfx::ImmutableBitmap> bitmap;
+    Gfx::ScalingMode scaling_mode;
+    Repeat repeat;
+
     void translate_by(Gfx::IntPoint const& offset) { dst_rect.translate_by(offset); }
 };
 
@@ -99,13 +114,13 @@ struct PushStackingContext {
     Gfx::IntRect source_paintable_rect;
     // A translation to be applied after the stacking context has been transformed.
     Gfx::IntPoint post_transform_translation;
-    CSS::ImageRendering image_rendering;
     StackingContextTransform transform;
     Optional<StackingContextMask> mask = {};
 
     void translate_by(Gfx::IntPoint const& offset)
     {
         source_paintable_rect.translate_by(offset);
+        transform.origin.translate_by(offset.to_type<float>());
     }
 };
 
@@ -114,7 +129,6 @@ struct PopStackingContext { };
 struct PaintLinearGradient {
     Gfx::IntRect gradient_rect;
     LinearGradientData linear_gradient_data;
-    Vector<Gfx::Path> clip_paths;
 
     [[nodiscard]] Gfx::IntRect bounding_rect() const { return gradient_rect; }
 
@@ -155,7 +169,6 @@ struct FillRectWithRoundedCorners {
     Gfx::IntRect rect;
     Color color;
     CornerRadii corner_radii;
-    Vector<Gfx::Path> clip_paths;
 
     [[nodiscard]] Gfx::IntRect bounding_rect() const { return rect; }
     void translate_by(Gfx::IntPoint const& offset) { rect.translate_by(offset); }
@@ -295,7 +308,6 @@ struct PaintRadialGradient {
     RadialGradientData radial_gradient_data;
     Gfx::IntPoint center;
     Gfx::IntSize size;
-    Vector<Gfx::Path> clip_paths;
 
     [[nodiscard]] Gfx::IntRect bounding_rect() const { return rect; }
 
@@ -306,7 +318,6 @@ struct PaintConicGradient {
     Gfx::IntRect rect;
     ConicGradientData conic_gradient_data;
     Gfx::IntPoint position;
-    Vector<Gfx::Path> clip_paths;
 
     [[nodiscard]] Gfx::IntRect bounding_rect() const { return rect; }
 
@@ -327,8 +338,7 @@ struct DrawTriangleWave {
     }
 };
 
-struct SampleUnderCorners {
-    u32 id;
+struct AddRoundedRectClip {
     CornerRadii corner_radii;
     Gfx::IntRect border_rect;
     CornerClip corner_clip;
@@ -338,13 +348,16 @@ struct SampleUnderCorners {
     void translate_by(Gfx::IntPoint const& offset) { border_rect.translate_by(offset); }
 };
 
-struct BlitCornerClipping {
-    u32 id;
-    Gfx::IntRect border_rect;
+struct AddMask {
+    RefPtr<DisplayList> display_list;
+    Gfx::IntRect rect;
 
-    [[nodiscard]] Gfx::IntRect bounding_rect() const { return border_rect; }
+    [[nodiscard]] Gfx::IntRect bounding_rect() const { return rect; }
 
-    void translate_by(Gfx::IntPoint const& offset) { border_rect.translate_by(offset); }
+    void translate_by(Gfx::IntPoint const& offset)
+    {
+        rect.translate_by(offset);
+    }
 };
 
 using Command = Variant<
@@ -352,6 +365,7 @@ using Command = Variant<
     FillRect,
     DrawScaledBitmap,
     DrawScaledImmutableBitmap,
+    DrawRepeatedImmutableBitmap,
     Save,
     Restore,
     AddClipRect,
@@ -374,7 +388,7 @@ using Command = Variant<
     ApplyBackdropFilter,
     DrawRect,
     DrawTriangleWave,
-    SampleUnderCorners,
-    BlitCornerClipping>;
+    AddRoundedRectClip,
+    AddMask>;
 
 }

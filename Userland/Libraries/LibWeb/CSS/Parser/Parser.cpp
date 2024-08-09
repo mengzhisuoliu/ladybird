@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2018-2022, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2020-2021, the SerenityOS developers.
- * Copyright (c) 2021-2023, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2021-2024, Sam Atkins <atkinssj@serenityos.org>
  * Copyright (c) 2021, Tobias Christiansen <tobyase@serenityos.org>
  * Copyright (c) 2022, MacDue <macdue@dueutil.tech>
  * Copyright (c) 2024, Shannon Booth <shannon@serenityos.org>
@@ -44,6 +44,8 @@
 #include <LibWeb/CSS/StyleValues/BorderRadiusStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ContentStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CounterDefinitionsStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CounterStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CustomIdentStyleValue.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/EasingStyleValue.h>
@@ -91,18 +93,9 @@ static void log_parse_error(SourceLocation const& location = SourceLocation::cur
 
 namespace Web::CSS::Parser {
 
-static bool contains_single_none_ident(TokenStream<ComponentValue>& tokens)
+Parser Parser::create(ParsingContext const& context, StringView input, StringView encoding)
 {
-    if (tokens.remaining_token_count() > 1)
-        return false;
-    if (auto token = tokens.peek_token(); token.is_ident("none"sv))
-        return true;
-    return false;
-}
-
-ErrorOr<Parser> Parser::create(ParsingContext const& context, StringView input, StringView encoding)
-{
-    auto tokens = TRY(Tokenizer::tokenize(input, encoding));
+    auto tokens = Tokenizer::tokenize(input, encoding);
     return Parser { context, move(tokens) };
 }
 
@@ -1569,6 +1562,37 @@ RefPtr<StyleValue> Parser::parse_builtin_value(ComponentValue const& component_v
     return nullptr;
 }
 
+// https://www.w3.org/TR/css-values-4/#custom-idents
+RefPtr<CustomIdentStyleValue> Parser::parse_custom_ident_value(TokenStream<ComponentValue>& tokens, std::initializer_list<StringView> blacklist)
+{
+    auto transaction = tokens.begin_transaction();
+    tokens.skip_whitespace();
+
+    auto token = tokens.next_token();
+    if (!token.is(Token::Type::Ident))
+        return nullptr;
+    auto custom_ident = token.token().ident();
+
+    // The CSS-wide keywords are not valid <custom-ident>s.
+    if (is_css_wide_keyword(custom_ident))
+        return nullptr;
+
+    // The default keyword is reserved and is also not a valid <custom-ident>.
+    if (custom_ident.equals_ignoring_ascii_case("default"sv))
+        return nullptr;
+
+    // Specifications using <custom-ident> must specify clearly what other keywords are excluded from <custom-ident>,
+    // if any—for example by saying that any pre-defined keywords in that property’s value definition are excluded.
+    // Excluded keywords are excluded in all ASCII case permutations.
+    for (auto& value : blacklist) {
+        if (custom_ident.equals_ignoring_ascii_case(value))
+            return nullptr;
+    }
+
+    transaction.commit();
+    return CustomIdentStyleValue::create(custom_ident);
+}
+
 RefPtr<CalculatedStyleValue> Parser::parse_calculated_value(ComponentValue const& component_value)
 {
     if (!component_value.is_function())
@@ -2900,6 +2924,175 @@ RefPtr<StyleValue> Parser::parse_color_value(TokenStream<ComponentValue>& tokens
     return nullptr;
 }
 
+// https://drafts.csswg.org/css-lists-3/#counter-functions
+RefPtr<StyleValue> Parser::parse_counter_value(TokenStream<ComponentValue>& tokens)
+{
+    auto parse_counter_name = [this](TokenStream<ComponentValue>& tokens) -> Optional<FlyString> {
+        // https://drafts.csswg.org/css-lists-3/#typedef-counter-name
+        // Counters are referred to in CSS syntax using the <counter-name> type, which represents
+        // their name as a <custom-ident>. A <counter-name> name cannot match the keyword none;
+        // such an identifier is invalid as a <counter-name>.
+        auto transaction = tokens.begin_transaction();
+        tokens.skip_whitespace();
+
+        auto counter_name = parse_custom_ident_value(tokens, { "none"sv });
+        if (!counter_name)
+            return {};
+
+        tokens.skip_whitespace();
+        if (tokens.has_next_token())
+            return {};
+
+        transaction.commit();
+        return counter_name->custom_ident();
+    };
+
+    auto parse_counter_style = [this](TokenStream<ComponentValue>& tokens) -> RefPtr<StyleValue> {
+        // https://drafts.csswg.org/css-counter-styles-3/#typedef-counter-style
+        // <counter-style> = <counter-style-name> | <symbols()>
+        // For now we just support <counter-style-name>, found here:
+        // https://drafts.csswg.org/css-counter-styles-3/#typedef-counter-style-name
+        // <counter-style-name> is a <custom-ident> that is not an ASCII case-insensitive match for none.
+        auto transaction = tokens.begin_transaction();
+        tokens.skip_whitespace();
+
+        auto counter_style_name = parse_custom_ident_value(tokens, { "none"sv });
+        if (!counter_style_name)
+            return {};
+
+        tokens.skip_whitespace();
+        if (tokens.has_next_token())
+            return {};
+
+        transaction.commit();
+        return counter_style_name.release_nonnull();
+    };
+
+    auto transaction = tokens.begin_transaction();
+    auto token = tokens.next_token();
+    if (token.is_function("counter"sv)) {
+        // counter() = counter( <counter-name>, <counter-style>? )
+        auto& function = token.function();
+        TokenStream function_tokens { function.values() };
+        auto function_values = parse_a_comma_separated_list_of_component_values(function_tokens);
+        if (function_values.is_empty() || function_values.size() > 2)
+            return nullptr;
+
+        TokenStream name_tokens { function_values[0] };
+        auto counter_name = parse_counter_name(name_tokens);
+        if (!counter_name.has_value())
+            return nullptr;
+
+        RefPtr<StyleValue> counter_style;
+        if (function_values.size() > 1) {
+            TokenStream counter_style_tokens { function_values[1] };
+            counter_style = parse_counter_style(counter_style_tokens);
+            if (!counter_style)
+                return nullptr;
+        } else {
+            // In both cases, if the <counter-style> argument is omitted it defaults to `decimal`.
+            counter_style = CustomIdentStyleValue::create("decimal"_fly_string);
+        }
+
+        transaction.commit();
+        return CounterStyleValue::create_counter(counter_name.release_value(), counter_style.release_nonnull());
+    }
+
+    if (token.is_function("counters"sv)) {
+        // counters() = counters( <counter-name>, <string>, <counter-style>? )
+        auto& function = token.function();
+        TokenStream function_tokens { function.values() };
+        auto function_values = parse_a_comma_separated_list_of_component_values(function_tokens);
+        if (function_values.size() < 2 || function_values.size() > 3)
+            return nullptr;
+
+        TokenStream name_tokens { function_values[0] };
+        auto counter_name = parse_counter_name(name_tokens);
+        if (!counter_name.has_value())
+            return nullptr;
+
+        TokenStream string_tokens { function_values[1] };
+        string_tokens.skip_whitespace();
+        RefPtr<StyleValue> join_string = parse_string_value(string_tokens);
+        string_tokens.skip_whitespace();
+        if (!join_string || string_tokens.has_next_token())
+            return nullptr;
+
+        RefPtr<StyleValue> counter_style;
+        if (function_values.size() > 2) {
+            TokenStream counter_style_tokens { function_values[2] };
+            counter_style = parse_counter_style(counter_style_tokens);
+            if (!counter_style)
+                return nullptr;
+        } else {
+            // In both cases, if the <counter-style> argument is omitted it defaults to `decimal`.
+            counter_style = CustomIdentStyleValue::create("decimal"_fly_string);
+        }
+
+        transaction.commit();
+        return CounterStyleValue::create_counters(counter_name.release_value(), join_string->as_string().string_value(), counter_style.release_nonnull());
+    }
+
+    return nullptr;
+}
+
+RefPtr<StyleValue> Parser::parse_counter_definitions_value(TokenStream<ComponentValue>& tokens, AllowReversed allow_reversed, i32 default_value_if_not_reversed)
+{
+    // If AllowReversed is Yes, parses:
+    //   [ <counter-name> <integer>? | <reversed-counter-name> <integer>? ]+
+    // Otherwise parses:
+    //   [ <counter-name> <integer>? ]+
+
+    // FIXME: This disabled parsing of `reversed()` counters. Remove this line once they're supported.
+    allow_reversed = AllowReversed::No;
+
+    auto transaction = tokens.begin_transaction();
+    tokens.skip_whitespace();
+
+    Vector<CounterDefinition> counter_definitions;
+    while (tokens.has_next_token()) {
+        auto per_item_transaction = tokens.begin_transaction();
+        CounterDefinition definition {};
+
+        // <counter-name> | <reversed-counter-name>
+        auto& token = tokens.next_token();
+        if (token.is(Token::Type::Ident)) {
+            definition.name = token.token().ident();
+            definition.is_reversed = false;
+        } else if (allow_reversed == AllowReversed::Yes && token.is_function("reversed"sv)) {
+            TokenStream function_tokens { token.function().values() };
+            function_tokens.skip_whitespace();
+            auto& name_token = function_tokens.next_token();
+            if (!name_token.is(Token::Type::Ident))
+                break;
+            function_tokens.skip_whitespace();
+            if (function_tokens.has_next_token())
+                break;
+
+            definition.name = name_token.token().ident();
+            definition.is_reversed = true;
+        } else {
+            break;
+        }
+        tokens.skip_whitespace();
+
+        // <integer>?
+        definition.value = parse_integer_value(tokens);
+        if (!definition.value && !definition.is_reversed)
+            definition.value = IntegerStyleValue::create(default_value_if_not_reversed);
+
+        counter_definitions.append(move(definition));
+        tokens.skip_whitespace();
+        per_item_transaction.commit();
+    }
+
+    if (counter_definitions.is_empty())
+        return {};
+
+    transaction.commit();
+    return CounterDefinitionsStyleValue::create(move(counter_definitions));
+}
+
 RefPtr<StyleValue> Parser::parse_ratio_value(TokenStream<ComponentValue>& tokens)
 {
     if (auto ratio = parse_ratio(tokens); ratio.has_value())
@@ -3341,6 +3534,20 @@ RefPtr<StyleValue> Parser::parse_simple_comma_separated_value_list(PropertyID pr
         tokens.reconsume_current_input_token();
         return nullptr;
     });
+}
+
+RefPtr<StyleValue> Parser::parse_all_as_single_none_value(TokenStream<ComponentValue>& tokens)
+{
+    auto transaction = tokens.begin_transaction();
+    tokens.skip_whitespace();
+    auto maybe_none = tokens.next_token();
+    tokens.skip_whitespace();
+
+    if (tokens.has_next_token() || !maybe_none.is_ident("none"sv))
+        return {};
+
+    transaction.commit();
+    return IdentifierStyleValue::create(ValueID::None);
 }
 
 static void remove_property(Vector<PropertyID>& properties, PropertyID property_to_remove)
@@ -3986,8 +4193,8 @@ RefPtr<StyleValue> Parser::parse_border_radius_shorthand_value(TokenStream<Compo
 RefPtr<StyleValue> Parser::parse_shadow_value(TokenStream<ComponentValue>& tokens, AllowInsetKeyword allow_inset_keyword)
 {
     // "none"
-    if (contains_single_none_ident(tokens))
-        return parse_identifier_value(tokens);
+    if (auto none = parse_all_as_single_none_value(tokens))
+        return none;
 
     return parse_comma_separated_value_list(tokens, [this, allow_inset_keyword](auto& tokens) {
         return parse_single_shadow_value(tokens, allow_inset_keyword);
@@ -4165,6 +4372,36 @@ RefPtr<StyleValue> Parser::parse_content_value(TokenStream<ComponentValue>& toke
     return ContentStyleValue::create(StyleValueList::create(move(content_values), StyleValueList::Separator::Space), move(alt_text));
 }
 
+// https://drafts.csswg.org/css-lists-3/#propdef-counter-increment
+RefPtr<StyleValue> Parser::parse_counter_increment_value(TokenStream<ComponentValue>& tokens)
+{
+    // [ <counter-name> <integer>? ]+ | none
+    if (auto none = parse_all_as_single_none_value(tokens))
+        return none;
+
+    return parse_counter_definitions_value(tokens, AllowReversed::No, 1);
+}
+
+// https://drafts.csswg.org/css-lists-3/#propdef-counter-reset
+RefPtr<StyleValue> Parser::parse_counter_reset_value(TokenStream<ComponentValue>& tokens)
+{
+    // [ <counter-name> <integer>? | <reversed-counter-name> <integer>? ]+ | none
+    if (auto none = parse_all_as_single_none_value(tokens))
+        return none;
+
+    return parse_counter_definitions_value(tokens, AllowReversed::Yes, 0);
+}
+
+// https://drafts.csswg.org/css-lists-3/#propdef-counter-set
+RefPtr<StyleValue> Parser::parse_counter_set_value(TokenStream<ComponentValue>& tokens)
+{
+    // [ <counter-name> <integer>? ]+ | none
+    if (auto none = parse_all_as_single_none_value(tokens))
+        return none;
+
+    return parse_counter_definitions_value(tokens, AllowReversed::No, 0);
+}
+
 // https://www.w3.org/TR/css-display-3/#the-display-properties
 RefPtr<StyleValue> Parser::parse_display_value(TokenStream<ComponentValue>& tokens)
 {
@@ -4298,12 +4535,10 @@ RefPtr<StyleValue> Parser::parse_display_value(TokenStream<ComponentValue>& toke
 
 RefPtr<StyleValue> Parser::parse_filter_value_list_value(TokenStream<ComponentValue>& tokens)
 {
-    auto transaction = tokens.begin_transaction();
+    if (auto none = parse_all_as_single_none_value(tokens))
+        return none;
 
-    if (contains_single_none_ident(tokens)) {
-        transaction.commit();
-        return parse_identifier_value(tokens);
-    }
+    auto transaction = tokens.begin_transaction();
 
     // FIXME: <url>s are ignored for now
     // <filter-value-list> = [ <filter-function> | <url> ]+
@@ -5543,10 +5778,8 @@ RefPtr<StyleValue> Parser::parse_transform_value(TokenStream<ComponentValue>& to
     // <transform> = none | <transform-list>
     // <transform-list> = <transform-function>+
 
-    if (contains_single_none_ident(tokens)) {
-        tokens.next_token(); // none
-        return IdentifierStyleValue::create(ValueID::None);
-    }
+    if (auto none = parse_all_as_single_none_value(tokens))
+        return none;
 
     StyleValueVector transformations;
     auto transaction = tokens.begin_transaction();
@@ -5797,10 +6030,8 @@ RefPtr<StyleValue> Parser::parse_transform_origin_value(TokenStream<ComponentVal
 
 RefPtr<StyleValue> Parser::parse_transition_value(TokenStream<ComponentValue>& tokens)
 {
-    if (contains_single_none_ident(tokens)) {
-        tokens.next_token(); // none
-        return IdentifierStyleValue::create(ValueID::None);
-    }
+    if (auto none = parse_all_as_single_none_value(tokens))
+        return none;
 
     Vector<TransitionStyleValue::Transition> transitions;
     auto transaction = tokens.begin_transaction();
@@ -5907,6 +6138,21 @@ Optional<CSS::GridSize> Parser::parse_grid_size(ComponentValue const& component_
         return GridSize(dimension->percentage());
     else if (dimension->is_flex())
         return GridSize(dimension->flex());
+    return {};
+}
+
+Optional<CSS::GridFitContent> Parser::parse_fit_content(Vector<ComponentValue> const& component_values)
+{
+    // https://www.w3.org/TR/css-grid-2/#valdef-grid-template-columns-fit-content
+    // 'fit-content( <length-percentage> )'
+    // Represents the formula max(minimum, min(limit, max-content)), where minimum represents an auto minimum (which is often, but not always,
+    // equal to a min-content minimum), and limit is the track sizing function passed as an argument to fit-content().
+    // This is essentially calculated as the smaller of minmax(auto, max-content) and minmax(auto, limit).
+    auto function_tokens = TokenStream(component_values);
+    function_tokens.skip_whitespace();
+    auto maybe_length_percentage = parse_length_percentage(function_tokens);
+    if (maybe_length_percentage.has_value())
+        return CSS::GridFitContent(CSS::GridSize(CSS::GridSize::Type::FitContent, maybe_length_percentage.value()));
     return {};
 }
 
@@ -6067,6 +6313,11 @@ Optional<CSS::ExplicitGridTrack> Parser::parse_track_sizing_function(ComponentVa
                 return CSS::ExplicitGridTrack(maybe_min_max_value.value());
             else
                 return {};
+        } else if (function_token.name().equals_ignoring_ascii_case("fit-content"sv)) {
+            auto maybe_fit_content_value = parse_fit_content(function_token.values());
+            if (maybe_fit_content_value.has_value())
+                return CSS::ExplicitGridTrack(maybe_fit_content_value.value());
+            return {};
         } else if (auto maybe_calculated = parse_calculated_value(token)) {
             return CSS::ExplicitGridTrack(GridSize(LengthPercentage(maybe_calculated.release_nonnull())));
         }
@@ -6085,13 +6336,10 @@ Optional<CSS::ExplicitGridTrack> Parser::parse_track_sizing_function(ComponentVa
 
 RefPtr<StyleValue> Parser::parse_grid_track_size_list(TokenStream<ComponentValue>& tokens, bool allow_separate_line_name_blocks)
 {
-    auto transaction = tokens.begin_transaction();
-
-    if (contains_single_none_ident(tokens)) {
-        tokens.next_token();
-        transaction.commit();
+    if (auto none = parse_all_as_single_none_value(tokens))
         return GridTrackSizeListStyleValue::make_none();
-    }
+
+    auto transaction = tokens.begin_transaction();
 
     Vector<Variant<ExplicitGridTrack, GridLineNames>> track_list;
     auto last_object_was_line_names = false;
@@ -6290,11 +6538,9 @@ RefPtr<StyleValue> Parser::parse_grid_track_placement(TokenStream<ComponentValue
             return true;
         return false;
     };
-    auto is_custom_ident = [](auto& token) -> bool {
+    auto parse_custom_ident = [this](auto& tokens) {
         // The <custom-ident> additionally excludes the keywords span and auto.
-        if (token.is(Token::Type::Ident) && !token.is_ident("span"sv) && !token.is_ident("auto"sv))
-            return true;
-        return false;
+        return parse_custom_ident_value(tokens, { "span"sv, "auto"sv });
     };
 
     auto transaction = tokens.begin_transaction();
@@ -6302,6 +6548,10 @@ RefPtr<StyleValue> Parser::parse_grid_track_placement(TokenStream<ComponentValue
     // FIXME: Handle the single-token case inside the loop instead, so that we can more easily call this from
     //        `parse_grid_area_shorthand_value()` using a single TokenStream.
     if (tokens.remaining_token_count() == 1) {
+        if (auto custom_ident = parse_custom_ident(tokens)) {
+            transaction.commit();
+            return GridTrackPlacementStyleValue::create(GridTrackPlacement::make_line({}, custom_ident->custom_ident().to_string()));
+        }
         auto& token = tokens.next_token();
         if (auto maybe_calculated = parse_calculated_value(token); maybe_calculated && maybe_calculated->resolves_to_number()) {
             transaction.commit();
@@ -6318,10 +6568,6 @@ RefPtr<StyleValue> Parser::parse_grid_track_placement(TokenStream<ComponentValue
         if (is_valid_integer(token)) {
             transaction.commit();
             return GridTrackPlacementStyleValue::create(GridTrackPlacement::make_line(static_cast<int>(token.token().number_value()), {}));
-        }
-        if (is_custom_ident(token)) {
-            transaction.commit();
-            return GridTrackPlacementStyleValue::create(GridTrackPlacement::make_line({}, token.token().ident().to_string()));
         }
         return nullptr;
     }
@@ -6346,10 +6592,10 @@ RefPtr<StyleValue> Parser::parse_grid_track_placement(TokenStream<ComponentValue
             span_or_position_value = static_cast<int>(tokens.next_token().token().to_integer());
             continue;
         }
-        if (is_custom_ident(token)) {
+        if (auto custom_ident = parse_custom_ident(tokens)) {
             if (!identifier_value.is_empty())
                 return nullptr;
-            identifier_value = tokens.next_token().token().ident().to_string();
+            identifier_value = custom_ident->custom_ident().to_string();
             continue;
         }
         break;
@@ -6582,10 +6828,8 @@ RefPtr<StyleValue> Parser::parse_grid_template_areas_value(TokenStream<Component
     // none | <string>+
     Vector<Vector<String>> grid_area_rows;
 
-    if (contains_single_none_ident(tokens)) {
-        (void)tokens.next_token(); // none
+    if (auto none = parse_all_as_single_none_value(tokens))
         return GridTemplateAreaStyleValue::create(move(grid_area_rows));
-    }
 
     auto transaction = tokens.begin_transaction();
     while (tokens.has_next_token() && tokens.peek_token().is(Token::Type::String)) {
@@ -6742,6 +6986,18 @@ Parser::ParseErrorOr<NonnullRefPtr<StyleValue>> Parser::parse_css_value(Property
         return ParseError::SyntaxError;
     case PropertyID::Content:
         if (auto parsed_value = parse_content_value(tokens); parsed_value && !tokens.has_next_token())
+            return parsed_value.release_nonnull();
+        return ParseError::SyntaxError;
+    case PropertyID::CounterIncrement:
+        if (auto parsed_value = parse_counter_increment_value(tokens); parsed_value && !tokens.has_next_token())
+            return parsed_value.release_nonnull();
+        return ParseError::SyntaxError;
+    case PropertyID::CounterReset:
+        if (auto parsed_value = parse_counter_reset_value(tokens); parsed_value && !tokens.has_next_token())
+            return parsed_value.release_nonnull();
+        return ParseError::SyntaxError;
+    case PropertyID::CounterSet:
+        if (auto parsed_value = parse_counter_set_value(tokens); parsed_value && !tokens.has_next_token())
             return parsed_value.release_nonnull();
         return ParseError::SyntaxError;
     case PropertyID::Display:
@@ -7017,14 +7273,19 @@ Optional<Parser::PropertyAndValue> Parser::parse_css_value_for_properties(Readon
 
         // Custom idents
         if (auto property = any_property_accepts_type(property_ids, ValueType::CustomIdent); property.has_value()) {
-            (void)tokens.next_token();
-            return PropertyAndValue { *property, CustomIdentStyleValue::create(peek_token.token().ident()) };
+            if (auto custom_ident = parse_custom_ident_value(tokens, {}))
+                return PropertyAndValue { *property, custom_ident };
         }
     }
 
     if (auto property = any_property_accepts_type(property_ids, ValueType::Color); property.has_value()) {
         if (auto maybe_color = parse_color_value(tokens))
             return PropertyAndValue { *property, maybe_color };
+    }
+
+    if (auto property = any_property_accepts_type(property_ids, ValueType::Counter); property.has_value()) {
+        if (auto maybe_counter = parse_counter_value(tokens))
+            return PropertyAndValue { *property, maybe_counter };
     }
 
     if (auto property = any_property_accepts_type(property_ids, ValueType::Image); property.has_value()) {
@@ -7556,7 +7817,7 @@ NonnullRefPtr<StyleValue> Parser::resolve_unresolved_style_value(ParsingContext 
 
     // If the value is invalid, we fall back to `unset`: https://www.w3.org/TR/css-variables-1/#invalid-at-computed-value-time
 
-    auto parser = MUST(Parser::create(context, ""sv));
+    auto parser = Parser::create(context, ""sv);
     return parser.resolve_unresolved_style_value(element, pseudo_element, property_id, unresolved);
 }
 
@@ -7631,7 +7892,7 @@ static RefPtr<StyleValue const> get_custom_property(DOM::Element const& element,
             return it->value.value;
     }
 
-    for (auto const* current_element = &element; current_element; current_element = current_element->parent_element()) {
+    for (auto const* current_element = &element; current_element; current_element = current_element->parent_or_shadow_host_element()) {
         if (auto it = current_element->custom_properties({}).find(custom_property_name); it != current_element->custom_properties({}).end())
             return it->value.value;
     }
@@ -7840,7 +8101,7 @@ bool Parser::substitute_attr_function(DOM::Element& element, FlyString const& pr
         auto attribute_value = element.get_attribute_value(attribute_name);
         if (attribute_type.equals_ignoring_ascii_case("angle"_fly_string)) {
             // Parse a component value from the attribute’s value.
-            auto component_value = MUST(Parser::Parser::create(m_context, attribute_value)).parse_as_component_value();
+            auto component_value = Parser::Parser::create(m_context, attribute_value).parse_as_component_value();
             // If the result is a <dimension-token> whose unit matches the given type, the result is the substitution value.
             // Otherwise, there is no substitution value.
             if (component_value.has_value() && component_value->is(Token::Type::Dimension)) {
@@ -7853,7 +8114,7 @@ bool Parser::substitute_attr_function(DOM::Element& element, FlyString const& pr
             // Parse a component value from the attribute’s value.
             // If the result is a <hex-color> or a named color ident, the substitution value is that result as a <color>.
             // Otherwise there is no substitution value.
-            auto component_value = MUST(Parser::Parser::create(m_context, attribute_value)).parse_as_component_value();
+            auto component_value = Parser::Parser::create(m_context, attribute_value).parse_as_component_value();
             if (component_value.has_value()) {
                 if ((component_value->is(Token::Type::Hash)
                         && Color::from_string(MUST(String::formatted("#{}", component_value->token().hash_value()))).has_value())
@@ -7865,7 +8126,7 @@ bool Parser::substitute_attr_function(DOM::Element& element, FlyString const& pr
             }
         } else if (attribute_type.equals_ignoring_ascii_case("flex"_fly_string)) {
             // Parse a component value from the attribute’s value.
-            auto component_value = MUST(Parser::Parser::create(m_context, attribute_value)).parse_as_component_value();
+            auto component_value = Parser::Parser::create(m_context, attribute_value).parse_as_component_value();
             // If the result is a <dimension-token> whose unit matches the given type, the result is the substitution value.
             // Otherwise, there is no substitution value.
             if (component_value.has_value() && component_value->is(Token::Type::Dimension)) {
@@ -7876,7 +8137,7 @@ bool Parser::substitute_attr_function(DOM::Element& element, FlyString const& pr
             }
         } else if (attribute_type.equals_ignoring_ascii_case("frequency"_fly_string)) {
             // Parse a component value from the attribute’s value.
-            auto component_value = MUST(Parser::Parser::create(m_context, attribute_value)).parse_as_component_value();
+            auto component_value = Parser::Parser::create(m_context, attribute_value).parse_as_component_value();
             // If the result is a <dimension-token> whose unit matches the given type, the result is the substitution value.
             // Otherwise, there is no substitution value.
             if (component_value.has_value() && component_value->is(Token::Type::Dimension)) {
@@ -7899,7 +8160,7 @@ bool Parser::substitute_attr_function(DOM::Element& element, FlyString const& pr
             }
         } else if (attribute_type.equals_ignoring_ascii_case("length"_fly_string)) {
             // Parse a component value from the attribute’s value.
-            auto component_value = MUST(Parser::Parser::create(m_context, attribute_value)).parse_as_component_value();
+            auto component_value = Parser::Parser::create(m_context, attribute_value).parse_as_component_value();
             // If the result is a <dimension-token> whose unit matches the given type, the result is the substitution value.
             // Otherwise, there is no substitution value.
             if (component_value.has_value() && component_value->is(Token::Type::Dimension)) {
@@ -7912,14 +8173,14 @@ bool Parser::substitute_attr_function(DOM::Element& element, FlyString const& pr
             // Parse a component value from the attribute’s value.
             // If the result is a <number-token>, the result is the substitution value.
             // Otherwise, there is no substitution value.
-            auto component_value = MUST(Parser::Parser::create(m_context, attribute_value)).parse_as_component_value();
+            auto component_value = Parser::Parser::create(m_context, attribute_value).parse_as_component_value();
             if (component_value.has_value() && component_value->is(Token::Type::Number)) {
                 dest.append(component_value.release_value());
                 return true;
             }
         } else if (attribute_type.equals_ignoring_ascii_case("percentage"_fly_string)) {
             // Parse a component value from the attribute’s value.
-            auto component_value = MUST(Parser::Parser::create(m_context, attribute_value)).parse_as_component_value();
+            auto component_value = Parser::Parser::create(m_context, attribute_value).parse_as_component_value();
             // If the result is a <percentage-token>, the result is the substitution value.
             // Otherwise, there is no substitution value.
             if (component_value.has_value() && component_value->is(Token::Type::Percentage)) {
@@ -7934,7 +8195,7 @@ bool Parser::substitute_attr_function(DOM::Element& element, FlyString const& pr
             return true;
         } else if (attribute_type.equals_ignoring_ascii_case("time"_fly_string)) {
             // Parse a component value from the attribute’s value.
-            auto component_value = MUST(Parser::Parser::create(m_context, attribute_value)).parse_as_component_value();
+            auto component_value = Parser::Parser::create(m_context, attribute_value).parse_as_component_value();
             // If the result is a <dimension-token> whose unit matches the given type, the result is the substitution value.
             // Otherwise, there is no substitution value.
             if (component_value.has_value() && component_value->is(Token::Type::Dimension)) {
@@ -7954,7 +8215,7 @@ bool Parser::substitute_attr_function(DOM::Element& element, FlyString const& pr
             // Parse a component value from the attribute’s value.
             // If the result is a <number-token>, the substitution value is a dimension with the result’s value, and the given unit.
             // Otherwise, there is no substitution value.
-            auto component_value = MUST(Parser::Parser::create(m_context, attribute_value)).parse_as_component_value();
+            auto component_value = Parser::Parser::create(m_context, attribute_value).parse_as_component_value();
             if (component_value.has_value() && component_value->is(Token::Type::Number)) {
                 if (attribute_value == "%"sv) {
                     dest.empend(Token::create_dimension(component_value->token().number_value(), attribute_type));

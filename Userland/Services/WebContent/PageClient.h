@@ -28,7 +28,6 @@ public:
     virtual ~PageClient() override;
 
     enum class UseSkiaPainter {
-        No,
         CPUBackend,
         GPUBackendIfAvailable,
     };
@@ -77,7 +76,6 @@ public:
     void ready_to_paint();
 
     void initialize_js_console(Web::DOM::Document& document);
-    void destroy_js_console(Web::DOM::Document& document);
     void js_console_input(ByteString const& js_source);
     void run_javascript(ByteString const& js_source);
     void js_console_request_messages(i32 start_index);
@@ -124,6 +122,7 @@ private:
     virtual void page_did_leave_tooltip_area() override;
     virtual void page_did_hover_link(URL::URL const&) override;
     virtual void page_did_unhover_link() override;
+    virtual void page_did_click_link(URL::URL const&, ByteString const& target, unsigned modifiers) override;
     virtual void page_did_middle_click_link(URL::URL const&, ByteString const& target, unsigned modifiers) override;
     virtual void page_did_request_context_menu(Web::CSSPixelPoint) override;
     virtual void page_did_request_link_context_menu(Web::CSSPixelPoint, URL::URL const&, ByteString const& target, unsigned modifiers) override;
@@ -132,7 +131,6 @@ private:
     virtual void page_did_start_loading(URL::URL const&, bool) override;
     virtual void page_did_create_new_document(Web::DOM::Document&) override;
     virtual void page_did_change_active_document_in_top_level_browsing_context(Web::DOM::Document&) override;
-    virtual void page_did_destroy_document(Web::DOM::Document&) override;
     virtual void page_did_finish_loading(URL::URL const&) override;
     virtual void page_did_request_alert(String const&) override;
     virtual void page_did_request_confirm(String const&) override;
@@ -205,8 +203,6 @@ private:
 
     BackingStoreManager m_backing_store_manager;
 
-    // NOTE: These documents are not visited, but manually removed from the map on document finalization.
-    HashMap<JS::RawGCPtr<Web::DOM::Document>, JS::NonnullGCPtr<WebContentConsoleClient>> m_console_clients;
     WeakPtr<WebContentConsoleClient> m_top_level_document_console_client;
 
     JS::Handle<JS::GlobalObject> m_console_global_object;

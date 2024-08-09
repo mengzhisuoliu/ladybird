@@ -7,6 +7,12 @@ if (POLICY CMP0116)
     cmake_policy(SET CMP0116 NEW)
 endif()
 
+# Enable better flags for configuring swift compilation mode
+if (POLICY CMP0157)
+   cmake_policy(SET CMP0157 NEW)
+   set(CMAKE_Swift_COMPILATION_MODE "$<IF:$<CONFIG:Release>,wholemodule,incremental>")
+endif()
+
 serenity_option(ENABLE_COMPILETIME_FORMAT_CHECK ON CACHE BOOL "Enable compiletime format string checks")
 serenity_option(ENABLE_UNDEFINED_SANITIZER OFF CACHE BOOL "Enable undefined behavior sanitizer testing in gcc/clang")
 serenity_option(UNDEFINED_BEHAVIOR_IS_FATAL OFF CACHE BOOL "Make undefined behavior sanitizer errors non-recoverable")
@@ -28,3 +34,9 @@ serenity_option(ENABLE_CLANG_PLUGINS OFF CACHE BOOL "Enable building with the Cl
 serenity_option(ENABLE_CLANG_PLUGINS_INVALID_FUNCTION_MEMBERS OFF CACHE BOOL "Enable detecting invalid function types as members of GC-allocated objects")
 
 serenity_option(ENABLE_GUI_TARGETS ON CACHE BOOL "Enable building GUI targets")
+serenity_option(ENABLE_INSTALL_HEADERS ON CACHE BOOL "Enable installing headers")
+serenity_option(ENABLE_SWIFT OFF CACHE BOOL "Enable building Swift files")
+
+if (ENABLE_SWIFT)
+    include(${CMAKE_CURRENT_LIST_DIR}/Swift/swift-settings.cmake)
+endif()

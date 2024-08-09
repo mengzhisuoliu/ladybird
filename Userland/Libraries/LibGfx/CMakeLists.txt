@@ -1,3 +1,5 @@
+include(skia)
+
 set(SOURCES
     AffineTransform.cpp
     AntiAliasingPainter.cpp
@@ -6,13 +8,10 @@ set(SOURCES
     Color.cpp
     DeltaE.cpp
     EdgeFlagPathRasterizer.cpp
-    Filters/ColorBlindnessFilter.cpp
-    Filters/FastBoxBlurFilter.cpp
-    Filters/LumaFilter.cpp
-    Filters/StackBlurFilter.cpp
     FontCascadeList.cpp
     Font/Emoji.cpp
     Font/Font.cpp
+    Font/FontData.cpp
     Font/FontDatabase.cpp
     Font/OpenType/Cmap.cpp
     Font/OpenType/Glyf.cpp
@@ -20,9 +19,11 @@ set(SOURCES
     Font/OpenType/Tables.cpp
     Font/OpenType/Typeface.cpp
     Font/ScaledFont.cpp
+    Font/ScaledFontSkia.cpp
     Font/Typeface.cpp
-    Font/WOFF/Typeface.cpp
-    Font/WOFF2/Typeface.cpp
+    Font/TypefaceSkia.cpp
+    Font/WOFF/Loader.cpp
+    Font/WOFF2/Loader.cpp
     GradientPainting.cpp
     ICC/BinaryWriter.cpp
     ICC/Enums.cpp
@@ -68,7 +69,8 @@ set(SOURCES
 )
 
 serenity_lib(LibGfx gfx)
-target_link_libraries(LibGfx PRIVATE LibCompress LibCore LibCrypto LibFileSystem LibRIFF LibTextCodec LibIPC LibUnicode LibURL)
+
+target_link_libraries(LibGfx PRIVATE LibCompress LibCore LibCrypto LibFileSystem LibRIFF LibTextCodec LibIPC LibUnicode LibURL ${SKIA_LIBRARIES})
 
 set(generated_sources TIFFMetadata.h TIFFTagHandler.cpp)
 list(TRANSFORM generated_sources PREPEND "ImageFormats/")
@@ -86,8 +88,14 @@ add_custom_target(generate_tiff_files_handler DEPENDS ${generated_sources})
 add_dependencies(all_generated generate_tiff_files_handler)
 add_dependencies(LibGfx generate_tiff_files_handler)
 
-list(TRANSFORM generated_sources PREPEND "${CMAKE_CURRENT_BINARY_DIR}/")
-install(FILES ${generated_sources} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/LibGfx/ImageFormats")
+set(generated_headers ${generated_sources})
+list(FILTER generated_headers INCLUDE REGEX "\\.h$")
+list(TRANSFORM generated_headers PREPEND "${CMAKE_CURRENT_BINARY_DIR}/")
+
+if (ENABLE_INSTALL_HEADERS)
+    list(TRANSFORM generated_sources PREPEND "${CMAKE_CURRENT_BINARY_DIR}/")
+    install(FILES ${generated_sources} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/LibGfx/ImageFormats")
+endif()
 
 # Third-party
 find_package(PkgConfig)
@@ -97,6 +105,37 @@ find_package(JPEG REQUIRED)
 find_package(PNG REQUIRED)
 find_package(LIBAVIF REQUIRED)
 find_package(WebP REQUIRED)
+pkg_check_modules(Jxl REQUIRED IMPORTED_TARGET libjxl)
 
-target_link_libraries(LibGfx PRIVATE PkgConfig::WOFF2 JPEG::JPEG PNG::PNG avif WebP::webp WebP::webpdecoder
+target_link_libraries(LibGfx PRIVATE PkgConfig::WOFF2 JPEG::JPEG PkgConfig::Jxl PNG::PNG avif WebP::webp WebP::webpdecoder
             WebP::webpdemux WebP::libwebpmux)
+
+if (ENABLE_SWIFT)
+    generate_clang_module_map(LibGfx GENERATED_FILES ${generated_headers})
+
+    target_compile_features(LibGfx PUBLIC cxx_std_23)
+
+    target_sources(LibGfx PRIVATE
+        Color.swift
+    )
+    target_compile_definitions(LibGfx PRIVATE LIBGFX_USE_SWIFT)
+    set_target_properties(LibGfx PROPERTIES Swift_MODULE_NAME "SwiftLibGfx")
+
+    # FIXME: These should be pulled automatically from interface compile options for the target
+    set(VFS_OVERLAY_OPTIONS
+        -Xcc -ivfsoverlay${CMAKE_CURRENT_BINARY_DIR}/vfs_overlay.yaml
+        -Xcc -ivfsoverlay${Lagom_BINARY_DIR}/AK/vfs_overlay.yaml
+    )
+    get_target_property(LIBGFX_NATIVE_DIRS LibGfx INCLUDE_DIRECTORIES)
+    _swift_generate_cxx_header(LibGfx "LibGfx-Swift.h"
+        SEARCH_PATHS ${LIBGFX_NATIVE_DIRS}
+        COMPILE_OPTIONS ${VFS_OVERLAY_OPTIONS}
+    )
+
+    # FIXME: https://gitlab.kitware.com/cmake/cmake/-/issues/26175
+    if (APPLE)
+        add_custom_command(TARGET LibGfx POST_BUILD
+            COMMAND install_name_tool -id @rpath/liblagom-gfx.0.dylib "$<TARGET_FILE:LibGfx>"
+        )
+    endif()
+endif()

@@ -88,29 +88,33 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if (EMSCRIPTEN)
     set(CMAKE_EXECUTABLE_SUFFIX ".js")
-    add_compile_options(-gsource-map)
-    add_link_options(--emrun "SHELL:-s ALLOW_MEMORY_GROWTH")
+    add_cxx_compile_options(-gsource-map)
+    add_cxx_link_options(--emrun "SHELL:-s ALLOW_MEMORY_GROWTH")
 endif()
 
 if (ENABLE_ADDRESS_SANITIZER)
-    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
-    set(LINKER_FLAGS "${LINKER_FLAGS} -fsanitize=address")
+    add_cxx_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    add_cxx_link_options(-fsanitize=address)
+    add_swift_compile_options(-sanitize=address)
+    add_swift_link_options(-sanitize=address)
 endif()
 
 if (ENABLE_MEMORY_SANITIZER)
-    add_compile_options(-fsanitize=memory -fsanitize-memory-track-origins -fno-omit-frame-pointer)
-    set(LINKER_FLAGS "${LINKER_FLAGS} -fsanitize=memory -fsanitize-memory-track-origins")
+    add_cxx_compile_options(-fsanitize=memory -fsanitize-memory-track-origins -fno-omit-frame-pointer)
+    add_cxx_link_options(-fsanitize=memory -fsanitize-memory-track-origins)
 endif()
 
-if (ENABLE_UNDEFINED_SANITIZER)
-    add_compile_options(-fsanitize=undefined -fno-omit-frame-pointer)
+if (ENABLE_UNDEFINED_SANITIZER AND (APPLE OR NOT ENABLE_SWIFT))
+    add_cxx_compile_options(-fsanitize=undefined -fno-omit-frame-pointer)
     if (UNDEFINED_BEHAVIOR_IS_FATAL)
-        add_compile_options(-fno-sanitize-recover=undefined)
+        add_cxx_compile_options(-fno-sanitize-recover=undefined)
     endif()
     if (APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang$" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "17")
-        add_compile_options(-fno-sanitize=function)
+        add_cxx_compile_options(-fno-sanitize=function)
     endif()
-    set(LINKER_FLAGS "${LINKER_FLAGS} -fsanitize=undefined")
+    add_cxx_link_options(-fsanitize=undefined)
+    add_swift_compile_options(-sanitize=undefined)
+    add_swift_link_options(-sanitize=undefined)
 endif()
 
 if (ENABLE_COMPILETIME_FORMAT_CHECK)
@@ -125,7 +129,7 @@ if (HAIKU)
 endif()
 
 if (ENABLE_FUZZERS)
-    add_compile_options(-fno-omit-frame-pointer)
+    add_cxx_compile_options(-fno-omit-frame-pointer)
 endif()
 
 CHECK_INCLUDE_FILE(pulse/pulseaudio.h HAVE_PULSEAUDIO)
@@ -134,14 +138,14 @@ add_library(JSClangPlugin INTERFACE)
 add_library(GenericClangPlugin INTERFACE)
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang$")
-    add_compile_options(-Wno-overloaded-virtual)
+    add_cxx_compile_options(-Wno-overloaded-virtual)
     # FIXME: Re-enable this check when the warning stops triggering, or document why we can't stop it from triggering.
     # For now, there is a lot of unused private fields in LibWeb that trigger this that could be removed.
     # See issue #14137 for details
-    add_compile_options(-Wno-unused-private-field)
+    add_cxx_compile_options(-Wno-unused-private-field)
 
     if (ENABLE_FUZZERS_LIBFUZZER)
-        add_compile_options(-fsanitize=fuzzer)
+        add_cxx_compile_options(-fsanitize=fuzzer)
         set(LINKER_FLAGS "${LINKER_FLAGS} -fsanitize=fuzzer")
     endif()
 
@@ -228,19 +232,23 @@ function(lagom_lib target_name fs_name)
     endif()
 
     # FIXME: Clean these up so that we don't need so many include dirs
-    target_include_directories(${target_name} INTERFACE
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/Services>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/Userland/Libraries>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/Userland/Services>
-    )
+    if (ENABLE_INSTALL_HEADERS)
+        target_include_directories(${target_name} INTERFACE
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/Services>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/Userland/Libraries>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/Userland/Services>
+        )
+    endif()
     add_lagom_library_install_rules(${target_name} ALIAS_NAME ${library})
-    # FIXME: Move this to serenity_install_headers
-    install(
-        DIRECTORY "${SERENITY_PROJECT_ROOT}/Userland/Libraries/Lib${library}"
-        COMPONENT Lagom_Development
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        FILES_MATCHING PATTERN "*.h"
-    )
+    if (ENABLE_INSTALL_HEADERS)
+        # FIXME: Move this to serenity_install_headers
+        install(
+            DIRECTORY "${SERENITY_PROJECT_ROOT}/Userland/Libraries/Lib${library}"
+            COMPONENT Lagom_Development
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+            FILES_MATCHING PATTERN "*.h"
+        )
+    endif()
     serenity_generated_sources(${target_name})
 endfunction()
 
@@ -347,18 +355,20 @@ add_serenity_subdirectory(Userland/Libraries/LibFileSystem)
 add_serenity_subdirectory(Userland/Libraries/LibIDL)
 
 # Manually install AK headers
-install(
-    DIRECTORY "${SERENITY_PROJECT_ROOT}/AK"
-    COMPONENT Lagom_Development
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    FILES_MATCHING PATTERN "*.h"
-)
-install(FILES
-    ${Lagom_BINARY_DIR}/AK/Debug.h
-    ${Lagom_BINARY_DIR}/AK/Backtrace.h
-    COMPONENT Lagom_Development
-    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/AK"
-)
+if (ENABLE_INSTALL_HEADERS)
+    install(
+        DIRECTORY "${SERENITY_PROJECT_ROOT}/AK"
+        COMPONENT Lagom_Development
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        FILES_MATCHING PATTERN "*.h"
+    )
+    install(FILES
+        ${Lagom_BINARY_DIR}/AK/Debug.h
+        ${Lagom_BINARY_DIR}/AK/Backtrace.h
+        COMPONENT Lagom_Development
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/AK"
+    )
+endif()
 
 # Code Generators and other host tools
 if (BUILD_LAGOM_TOOLS)
@@ -574,13 +584,13 @@ if (BUILD_TESTING)
         ../../Tests/LibWasm/test-wasm.cpp
         ../../Userland/Libraries/LibTest/JavaScriptTestRunnerMain.cpp)
     target_link_libraries(test-wasm AK LibCore LibFileSystem LibTest LibWasm LibJS LibCrypto)
+    set(wasm_test_root "${SERENITY_PROJECT_ROOT}")
+    if (INCLUDE_WASM_SPEC_TESTS)
+       set(wasm_test_root "${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
     add_test(
-        NAME WasmParser
-        COMMAND test-wasm --show-progress=false ${CMAKE_CURRENT_BINARY_DIR}/Userland/Libraries/LibWasm/Tests
-    )
-    set_tests_properties(WasmParser PROPERTIES
-        SKIP_RETURN_CODE 1
-        ENVIRONMENT LADYBIRD_SOURCE_DIR=${SERENITY_PROJECT_ROOT}
+        NAME Wasm
+        COMMAND test-wasm --show-progress=false "${wasm_test_root}/Userland/Libraries/LibWasm/Tests"
     )
 endif()
 

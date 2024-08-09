@@ -1,5 +1,6 @@
 include(libweb_generators)
 include(vulkan)
+include(skia)
 
 set(SOURCES
     Animations/Animatable.cpp
@@ -33,6 +34,7 @@ set(SOURCES
     CSS/AnimationEvent.cpp
     CSS/CalculatedOr.cpp
     CSS/Clip.cpp
+    CSS/CountersSet.cpp
     CSS/CSS.cpp
     CSS/CSSAnimation.cpp
     CSS/CSSConditionRule.cpp
@@ -109,6 +111,8 @@ set(SOURCES
     CSS/StyleValues/ColorStyleValue.cpp
     CSS/StyleValues/ConicGradientStyleValue.cpp
     CSS/StyleValues/ContentStyleValue.cpp
+    CSS/StyleValues/CounterDefinitionsStyleValue.cpp
+    CSS/StyleValues/CounterStyleValue.cpp
     CSS/StyleValues/DisplayStyleValue.cpp
     CSS/StyleValues/EasingStyleValue.cpp
     CSS/StyleValues/EdgeStyleValue.cpp
@@ -192,6 +196,7 @@ set(SOURCES
     DOM/StyleElementUtils.cpp
     DOM/Text.cpp
     DOM/TreeWalker.cpp
+    DOM/Utils.cpp
     DOM/XMLDocument.cpp
     DOMParsing/XMLSerializer.cpp
     DOMURL/DOMURL.cpp
@@ -214,6 +219,7 @@ set(SOURCES
     Fetch/Infrastructure/ConnectionTimingInfo.cpp
     Fetch/Infrastructure/FetchAlgorithms.cpp
     Fetch/Infrastructure/FetchController.cpp
+    Fetch/Infrastructure/FetchRecord.cpp
     Fetch/Infrastructure/FetchParams.cpp
     Fetch/Infrastructure/FetchTimingInfo.cpp
     Fetch/Infrastructure/HTTP.cpp
@@ -274,6 +280,7 @@ set(SOURCES
     HTML/DedicatedWorkerGlobalScope.cpp
     HTML/DocumentState.cpp
     HTML/DOMParser.cpp
+    HTML/DOMStringList.cpp
     HTML/DOMStringMap.cpp
     HTML/DragEvent.cpp
     HTML/ElementInternals.cpp
@@ -427,7 +434,7 @@ set(SOURCES
     HTML/SelectItem.cpp
     HTML/SessionHistoryEntry.cpp
     HTML/SessionHistoryTraversalQueue.cpp
-    HTML/SharedImageRequest.cpp
+    HTML/SharedResourceRequest.cpp
     HTML/SourceSet.cpp
     HTML/Storage.cpp
     HTML/StructuredSerialize.cpp
@@ -531,6 +538,7 @@ set(SOURCES
     MixedContent/AbstractOperations.cpp
     Namespace.cpp
     NavigationTiming/EntryNames.cpp
+    NavigationTiming/PerformanceNavigation.cpp
     NavigationTiming/PerformanceTiming.cpp
     Page/EditEventHandler.cpp
     Page/EventHandler.cpp
@@ -548,11 +556,9 @@ set(SOURCES
     Painting/CheckBoxPaintable.cpp
     Painting/ClippableAndScrollable.cpp
     Painting/DisplayList.cpp
-    Painting/DisplayListPlayerCPU.cpp
     Painting/DisplayListPlayerSkia.cpp
     Painting/DisplayListRecorder.cpp
     Painting/GradientPainting.cpp
-    Painting/FilterPainting.cpp
     Painting/ImagePaintable.cpp
     Painting/InlinePaintable.cpp
     Painting/LabelablePaintable.cpp
@@ -681,11 +687,14 @@ set(SOURCES
     WebAssembly/Table.cpp
     WebAssembly/WebAssembly.cpp
     WebAudio/AudioBuffer.cpp
+    WebAudio/AudioBufferSourceNode.cpp
     WebAudio/AudioContext.cpp
+    WebAudio/AudioDestinationNode.cpp
     WebAudio/AudioNode.cpp
     WebAudio/AudioParam.cpp
     WebAudio/AudioScheduledSourceNode.cpp
     WebAudio/BaseAudioContext.cpp
+    WebAudio/BiquadFilterNode.cpp
     WebAudio/DynamicsCompressorNode.cpp
     WebAudio/GainNode.cpp
     WebAudio/OfflineAudioContext.cpp
@@ -759,29 +768,6 @@ set(GENERATED_SOURCES
 )
 
 serenity_lib(LibWeb web)
-
-find_package(unofficial-skia CONFIG)
-if(unofficial-skia_FOUND)
-    set(SKIA_LIBRARIES unofficial::skia::skia)
-else()
-    find_package(PkgConfig)
-
-    # Get skia version from vcpkg.json
-    file(READ ${LADYBIRD_SOURCE_DIR}/vcpkg.json VCPKG_DOT_JSON)
-    string(JSON VCPKG_OVERRIDES_LENGTH LENGTH ${VCPKG_DOT_JSON} overrides)
-    MATH(EXPR VCPKG_OVERRIDES_END_RANGE "${VCPKG_OVERRIDES_LENGTH}-1")
-    foreach(IDX RANGE ${VCPKG_OVERRIDES_END_RANGE})
-      string(JSON VCPKG_OVERRIDE_NAME GET ${VCPKG_DOT_JSON} overrides ${IDX} name)
-      if(VCPKG_OVERRIDE_NAME STREQUAL "skia")
-        string(JSON SKIA_REQUIRED_VERSION GET ${VCPKG_DOT_JSON} overrides ${IDX} version)
-        string(REGEX MATCH "[0-9]+" SKIA_REQUIRED_VERSION ${SKIA_REQUIRED_VERSION})
-      endif()
-    endforeach()
-
-    pkg_check_modules(SKIA skia=${SKIA_REQUIRED_VERSION} REQUIRED)
-    target_include_directories(LibWeb PRIVATE ${SKIA_INCLUDE_DIRS})
-    target_link_directories(LibWeb PRIVATE ${SKIA_LIBRARY_DIRS})
-endif()
 
 target_link_libraries(LibWeb PRIVATE LibCore LibCrypto LibJS LibHTTP LibGfx LibIPC LibRegex LibSyntax LibTextCodec LibUnicode LibAudio LibMedia LibWasm LibXML LibIDL LibURL LibTLS ${SKIA_LIBRARIES})
 

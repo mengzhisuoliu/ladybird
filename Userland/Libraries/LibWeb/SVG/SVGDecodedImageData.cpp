@@ -15,7 +15,6 @@
 #include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Page/Page.h>
-#include <LibWeb/Painting/DisplayListPlayerCPU.h>
 #include <LibWeb/Painting/DisplayListPlayerSkia.h>
 #include <LibWeb/Painting/PaintContext.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
@@ -88,27 +87,22 @@ void SVGDecodedImageData::visit_edges(Cell::Visitor& visitor)
 
 RefPtr<Gfx::Bitmap> SVGDecodedImageData::render(Gfx::IntSize size) const
 {
-    auto bitmap = Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, size).release_value_but_fixme_should_propagate_errors();
+    auto bitmap = Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, size).release_value_but_fixme_should_propagate_errors();
     VERIFY(m_document->navigable());
     m_document->navigable()->set_viewport_size(size.to_type<CSSPixels>());
     m_document->update_layout();
 
-    Painting::DisplayList display_list;
+    auto display_list = Painting::DisplayList::create();
     Painting::DisplayListRecorder display_list_recorder(display_list);
 
     m_document->navigable()->record_display_list(display_list_recorder, {});
 
     auto painting_command_executor_type = m_page_client->display_list_player_type();
     switch (painting_command_executor_type) {
-    case DisplayListPlayerType::CPU: {
-        Painting::DisplayListPlayerCPU executor { *bitmap };
-        display_list.execute(executor);
-        break;
-    }
     case DisplayListPlayerType::SkiaGPUIfAvailable:
     case DisplayListPlayerType::SkiaCPU: {
-        Painting::DisplayListPlayerSkia executor { *bitmap };
-        display_list.execute(executor);
+        Painting::DisplayListPlayerSkia display_list_player { *bitmap };
+        display_list_player.execute(display_list);
         break;
     }
     default:

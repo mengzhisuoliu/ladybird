@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#define AK_DONT_REPLACE_STD
-
 #include <AK/Array.h>
 #include <AK/Checked.h>
 #include <AK/Endian.h>
@@ -49,6 +47,8 @@ ErrorOr<String> String::from_utf16(Utf16View const& utf16)
 {
     if (!utf16.validate())
         return Error::from_string_literal("String::from_utf16: Input was not valid UTF-16");
+    if (utf16.is_empty())
+        return String {};
 
     String result;
 
@@ -93,6 +93,23 @@ ErrorOr<String> String::from_stream(Stream& stream, size_t byte_count)
             return Error::from_string_literal("String::from_stream: Input was not valid UTF-8");
         return {};
     }));
+    return result;
+}
+
+ErrorOr<String> String::from_string_builder(Badge<StringBuilder>, StringBuilder& builder)
+{
+    if (!Utf8View { builder.string_view() }.validate())
+        return Error::from_string_literal("String::from_string_builder: Input was not valid UTF-8");
+
+    String result;
+    result.replace_with_string_builder(builder);
+    return result;
+}
+
+String String::from_string_builder_without_validation(Badge<StringBuilder>, StringBuilder& builder)
+{
+    String result;
+    result.replace_with_string_builder(builder);
     return result;
 }
 

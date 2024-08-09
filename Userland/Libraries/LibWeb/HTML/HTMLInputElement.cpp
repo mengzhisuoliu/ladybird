@@ -2,7 +2,7 @@
  * Copyright (c) 2018-2023, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2022, Adam Hodgen <ant1441@gmail.com>
  * Copyright (c) 2022, Andrew Kaster <akaster@serenityos.org>
- * Copyright (c) 2023, Shannon Booth <shannon@serenityos.org>
+ * Copyright (c) 2023-2024, Shannon Booth <shannon@serenityos.org>
  * Copyright (c) 2023, Bastiaan van der Plaat <bastiaan.v.d.plaat@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -31,7 +31,7 @@
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/SelectedFile.h>
-#include <LibWeb/HTML/SharedImageRequest.h>
+#include <LibWeb/HTML/SharedResourceRequest.h>
 #include <LibWeb/HTML/ValidityState.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Infra/CharacterTypes.h>
@@ -80,7 +80,7 @@ void HTMLInputElement::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_selected_files);
     visitor.visit(m_slider_thumb);
     visitor.visit(m_slider_progress_element);
-    visitor.visit(m_image_request);
+    visitor.visit(m_resource_request);
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-validity
@@ -407,7 +407,7 @@ WebIDL::ExceptionOr<void> HTMLInputElement::run_input_activation_behavior(DOM::E
     return {};
 }
 
-void HTMLInputElement::did_edit_text_node(Badge<Navigable>)
+void HTMLInputElement::did_edit_text_node(Badge<DOM::Document>)
 {
     // An input element's dirty value flag must be set to true whenever the user interacts with the control in a way that changes the value.
     m_value = value_sanitization_algorithm(m_text_node->data());
@@ -555,8 +555,7 @@ WebIDL::ExceptionOr<void> HTMLInputElement::set_value(String const& value)
                 m_text_node->set_data(m_value);
                 update_placeholder_visibility();
 
-                if (auto navigable = document().navigable())
-                    navigable->set_cursor_position(DOM::Position::create(realm, *m_text_node, m_text_node->data().bytes().size()));
+                document().set_cursor_position(DOM::Position::create(realm, *m_text_node, m_text_node->data().bytes().size()));
             }
 
             update_shadow_tree();
@@ -1137,17 +1136,20 @@ void HTMLInputElement::did_receive_focus()
     if (!m_text_node)
         return;
     m_text_node->invalidate_style();
-    auto navigable = document().navigable();
-    if (!navigable) {
-        return;
-    }
-    navigable->set_cursor_position(DOM::Position::create(realm(), *m_text_node, 0));
+
+    if (m_placeholder_text_node)
+        m_placeholder_text_node->invalidate_style();
+
+    document().set_cursor_position(DOM::Position::create(realm(), *m_text_node, 0));
 }
 
 void HTMLInputElement::did_lose_focus()
 {
     if (m_text_node)
         m_text_node->invalidate_style();
+
+    if (m_placeholder_text_node)
+        m_placeholder_text_node->invalidate_style();
 
     commit_pending_changes();
 }
@@ -1240,8 +1242,8 @@ WebIDL::ExceptionOr<void> HTMLInputElement::handle_src_attribute(String const& v
     request->set_use_url_credentials(true);
 
     // 4. Fetch request, with processResponseEndOfBody set to the following step given response response:
-    m_image_request = SharedImageRequest::get_or_create(realm, document().page(), request->url());
-    m_image_request->add_callbacks(
+    m_resource_request = SharedResourceRequest::get_or_create(realm, document().page(), request->url());
+    m_resource_request->add_callbacks(
         [this, &realm]() {
             // 1. If the download was successful and the image is available, queue an element task on the user interaction
             //    task source given the input element to fire an event named load at the input element.
@@ -1263,8 +1265,8 @@ WebIDL::ExceptionOr<void> HTMLInputElement::handle_src_attribute(String const& v
             m_load_event_delayer.clear();
         });
 
-    if (m_image_request->needs_fetching()) {
-        m_image_request->fetch_image(realm, request);
+    if (m_resource_request->needs_fetching()) {
+        m_resource_request->fetch_resource(realm, request);
     }
 
     // Fetching the image must delay the load event of the element's node document until the task that is queued by the
@@ -1561,8 +1563,8 @@ void HTMLInputElement::legacy_cancelled_activation_behavior_was_not_called()
 
 JS::GCPtr<DecodedImageData> HTMLInputElement::image_data() const
 {
-    if (m_image_request)
-        return m_image_request->image_data();
+    if (m_resource_request)
+        return m_resource_request->image_data();
     return nullptr;
 }
 
@@ -2070,6 +2072,52 @@ WebIDL::ExceptionOr<void> HTMLInputElement::set_selection_range(u32 start, u32 e
     return {};
 }
 
+// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#textFieldSelection:dom-textarea/input-selectionstart-2
+WebIDL::ExceptionOr<void> HTMLInputElement::set_selection_start_for_bindings(Optional<WebIDL::UnsignedLong> const& value)
+{
+    // 1. If this element is an input element, and selectionStart does not apply to this element, throw an
+    //    "InvalidStateError" DOMException.
+    if (!selection_or_range_applies())
+        return WebIDL::InvalidStateError::create(realm(), "setSelectionStart does not apply to this input type"_fly_string);
+
+    // NOTE: Steps continued below:
+    return set_selection_start(value);
+}
+
+// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-selectionstart
+Optional<WebIDL::UnsignedLong> HTMLInputElement::selection_start_for_bindings() const
+{
+    // 1. If this element is an input element, and selectionStart does not apply to this element, return null.
+    if (!selection_or_range_applies())
+        return {};
+
+    // NOTE: Steps continued below:
+    return selection_start();
+}
+
+// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#textFieldSelection:dom-textarea/input-selectionend-3
+WebIDL::ExceptionOr<void> HTMLInputElement::set_selection_end_for_bindings(Optional<WebIDL::UnsignedLong> const& value)
+{
+    // 1. If this element is an input element, and selectionEnd does not apply to this element, throw an
+    //    "InvalidStateError" DOMException.
+    if (!selection_or_range_applies())
+        return WebIDL::InvalidStateError::create(realm(), "setSelectionEnd does not apply to this input type"_fly_string);
+
+    // NOTE: Steps continued below:
+    return set_selection_end(value);
+}
+
+// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-textarea/input-selectionend
+Optional<WebIDL::UnsignedLong> HTMLInputElement::selection_end_for_bindings() const
+{
+    // 1. If this element is an input element, and selectionEnd does not apply to this element, return null.
+    if (!selection_or_range_applies())
+        return {};
+
+    // NOTE: Steps continued below:
+    return selection_end();
+}
+
 Optional<ARIA::Role> HTMLInputElement::default_role() const
 {
     // https://www.w3.org/TR/html-aria/#el-input-button
@@ -2192,6 +2240,21 @@ bool HTMLInputElement::has_input_activation_behavior() const
     case TypeAttributeState::RadioButton:
     case TypeAttributeState::ResetButton:
     case TypeAttributeState::SubmitButton:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// https://html.spec.whatwg.org/multipage/input.html#do-not-apply
+bool HTMLInputElement::selection_or_range_applies() const
+{
+    switch (type_state()) {
+    case TypeAttributeState::Text:
+    case TypeAttributeState::Search:
+    case TypeAttributeState::Telephone:
+    case TypeAttributeState::URL:
+    case TypeAttributeState::Password:
         return true;
     default:
         return false;

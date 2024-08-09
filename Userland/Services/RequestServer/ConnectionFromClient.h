@@ -23,7 +23,7 @@ class ConnectionFromClient final
     C_OBJECT(ConnectionFromClient);
 
 public:
-    ~ConnectionFromClient() override = default;
+    ~ConnectionFromClient() override;
 
     virtual void die() override;
 
@@ -31,6 +31,23 @@ public:
     void did_finish_request(Badge<Request>, Request&, bool success);
     void did_progress_request(Badge<Request>, Request&);
     void did_request_certificates(Badge<Request>, Request&);
+
+    struct StartRequest {
+        i32 request_id;
+        ByteString method;
+        URL::URL url;
+        HTTP::HeaderMap request_headers;
+        ByteBuffer request_body;
+        Core::ProxyData proxy_data;
+    };
+
+    struct EnsureConnection {
+        URL::URL url;
+        CacheLevel cache_level;
+    };
+
+    using Work = Variant<StartRequest, EnsureConnection, Empty>;
+    void worker_do_work(Work);
 
 private:
     explicit ConnectionFromClient(NonnullOwnPtr<Core::LocalSocket>);
@@ -49,36 +66,13 @@ private:
     virtual void websocket_close(i32, u16, ByteString const&) override;
     virtual Messages::RequestServer::WebsocketSetCertificateResponse websocket_set_certificate(i32, ByteString const&, ByteString const&) override;
 
-    struct StartRequest {
-        i32 request_id;
-        ByteString method;
-        URL::URL url;
-        HTTP::HeaderMap request_headers;
-        ByteBuffer request_body;
-        Core::ProxyData proxy_data;
-    };
-
-    struct EnsureConnection {
-        URL::URL url;
-        CacheLevel cache_level;
-    };
-
-    using Work = Variant<StartRequest, EnsureConnection, Empty>;
-
-    void worker_do_work(Work);
+    virtual void dump_connection_info() override;
 
     Threading::MutexProtected<HashMap<i32, OwnPtr<Request>>> m_requests;
     HashMap<i32, RefPtr<WebSocket::WebSocket>> m_websockets;
 
     void enqueue(Work);
 
-    template<typename Pool>
-    struct Looper : public Threading::ThreadPoolLooper<Pool> {
-        IterationDecision next(Pool& pool, bool wait);
-        Core::EventLoop event_loop;
-    };
-
-    Threading::ThreadPool<Work, Looper> m_thread_pool;
     Threading::Mutex m_ipc_mutex;
 };
 

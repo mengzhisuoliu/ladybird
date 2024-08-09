@@ -38,6 +38,7 @@ public:
         String custom_properties_json;
         String node_box_sizing_json;
         String aria_properties_state_json;
+        String fonts_json;
     };
 
     void set_url(Badge<WebContentClient>, URL::URL url) { m_url = move(url); }
@@ -65,6 +66,8 @@ public:
     void set_preferred_color_scheme(Web::CSS::PreferredColorScheme);
     void set_preferred_contrast(Web::CSS::PreferredContrast);
     void set_preferred_motion(Web::CSS::PreferredMotion);
+
+    void set_preferred_languages(Vector<String>);
 
     void set_enable_do_not_track(bool);
 

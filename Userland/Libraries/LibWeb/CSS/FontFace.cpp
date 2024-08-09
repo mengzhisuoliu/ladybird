@@ -7,8 +7,8 @@
 #include <LibCore/Promise.h>
 #include <LibGfx/Font/OpenType/Typeface.h>
 #include <LibGfx/Font/Typeface.h>
-#include <LibGfx/Font/WOFF/Typeface.h>
-#include <LibGfx/Font/WOFF2/Typeface.h>
+#include <LibGfx/Font/WOFF/Loader.h>
+#include <LibGfx/Font/WOFF2/Loader.h>
 #include <LibJS/Heap/Heap.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/Realm.h>
@@ -40,12 +40,12 @@ static NonnullRefPtr<Core::Promise<NonnullRefPtr<Gfx::Typeface>>> load_vector_fo
             promise->resolve(ttf.release_value());
             return;
         }
-        auto woff = WOFF::Typeface::try_load_from_externally_owned_memory(data);
+        auto woff = WOFF::try_load_from_externally_owned_memory(data);
         if (!woff.is_error()) {
             promise->resolve(woff.release_value());
             return;
         }
-        auto woff2 = WOFF2::Typeface::try_load_from_externally_owned_memory(data);
+        auto woff2 = WOFF2::try_load_from_externally_owned_memory(data);
         if (!woff2.is_error()) {
             promise->resolve(woff2.release_value());
             return;
@@ -61,11 +61,8 @@ JS_DEFINE_ALLOCATOR(FontFace);
 template<CSS::PropertyID PropertyID>
 RefPtr<CSS::StyleValue const> parse_property_string(JS::Realm& realm, StringView value)
 {
-    auto maybe_parser = CSS::Parser::Parser::create(CSS::Parser::ParsingContext(realm), value);
-    if (maybe_parser.is_error())
-        return {};
-
-    return maybe_parser.release_value().parse_as_css_value(PropertyID);
+    auto parser = CSS::Parser::Parser::create(CSS::Parser::ParsingContext(realm), value);
+    return parser.parse_as_css_value(PropertyID);
 }
 
 // https://drafts.csswg.org/css-font-loading/#font-face-constructor
@@ -92,15 +89,10 @@ JS::NonnullGCPtr<FontFace> FontFace::construct_impl(JS::Realm& realm, String fam
     Vector<CSS::ParsedFontFace::Source> sources;
     ByteBuffer buffer;
     if (auto* string = source.get_pointer<String>()) {
-        auto maybe_parser = CSS::Parser::Parser::create(CSS::Parser::ParsingContext(realm, base_url), *string);
-        if (maybe_parser.is_error()) {
+        auto parser = CSS::Parser::Parser::create(CSS::Parser::ParsingContext(realm, base_url), *string);
+        sources = parser.parse_as_font_face_src();
+        if (sources.is_empty())
             WebIDL::reject_promise(realm, promise, WebIDL::SyntaxError::create(realm, "FontFace constructor: Invalid source string"_fly_string));
-        } else {
-            auto parser = maybe_parser.release_value();
-            sources = parser.parse_as_font_face_src();
-            if (sources.is_empty())
-                WebIDL::reject_promise(realm, promise, WebIDL::SyntaxError::create(realm, "FontFace constructor: Invalid source string"_fly_string));
-        }
     } else {
         auto buffer_source = source.get<JS::Handle<WebIDL::BufferSource>>();
         auto maybe_buffer = WebIDL::get_buffer_source_copy(buffer_source->raw_object());

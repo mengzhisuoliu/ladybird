@@ -108,21 +108,6 @@ Navigable::Navigable(JS::NonnullGCPtr<Page> page)
     , m_event_handler({}, *this)
 {
     all_navigables().set(this);
-
-    m_cursor_blink_timer = Core::Timer::create_repeating(500, [this] {
-        if (!is_focused())
-            return;
-        if (!m_cursor_position)
-            return;
-        auto node = m_cursor_position->node();
-        if (!node)
-            return;
-        node->document().update_layout();
-        if (node->paintable()) {
-            m_cursor_blink_state = !m_cursor_blink_state;
-            node->paintable()->set_needs_display();
-        }
-    });
 }
 
 Navigable::~Navigable()
@@ -138,7 +123,6 @@ void Navigable::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_current_session_history_entry);
     visitor.visit(m_active_session_history_entry);
     visitor.visit(m_container);
-    visitor.visit(m_cursor_position);
     m_event_handler.visit_edges(visitor);
 }
 
@@ -1525,7 +1509,7 @@ WebIDL::ExceptionOr<void> Navigable::navigate_to_a_fragment(URL::URL const& url,
 
     // 13. Update document for history step application given navigable's active document, historyEntry, true, scriptHistoryIndex, and scriptHistoryLength.
     // AD HOC: Skip updating the navigation api entries twice here
-    active_document()->update_for_history_step_application(*history_entry, true, script_history_length, script_history_index, {}, false);
+    active_document()->update_for_history_step_application(*history_entry, true, script_history_length, script_history_index, navigation_type, {}, {}, false);
 
     // 14. Update the navigation API entries for a same-document navigation given navigation, historyEntry, and historyHandling.
     navigation->update_the_navigation_api_entries_for_a_same_document_navigation(history_entry, navigation_type);
@@ -2010,7 +1994,7 @@ void Navigable::set_viewport_size(CSSPixelSize size)
         document->invalidate_style();
         document->set_needs_layout();
     }
-    m_needs_repaint = true;
+    set_needs_display();
 
     if (auto document = active_document()) {
         document->inform_all_viewport_clients_about_the_current_viewport_rect();
@@ -2025,7 +2009,7 @@ void Navigable::perform_scroll_of_viewport(CSSPixelPoint new_position)
     if (m_viewport_scroll_offset != new_position) {
         m_viewport_scroll_offset = new_position;
         scroll_offset_did_change();
-        m_needs_repaint = true;
+        set_needs_display();
 
         if (auto document = active_document())
             document->inform_all_viewport_clients_about_the_current_viewport_rect();
@@ -2143,7 +2127,6 @@ void Navigable::record_display_list(Painting::DisplayListRecorder& display_list_
             scroll_offsets_by_frame_id[scrollable_frame->id] = scroll_offset;
         }
         display_list_recorder.display_list().apply_scroll_offsets(scroll_offsets_by_frame_id);
-        display_list_recorder.display_list().mark_unnecessary_commands();
     }
 
     m_needs_repaint = false;
@@ -2163,44 +2146,9 @@ UserNavigationInvolvement user_navigation_involvement(DOM::Event const& event)
     return event.is_trusted() ? UserNavigationInvolvement::Activation : UserNavigationInvolvement::None;
 }
 
-void Navigable::did_edit(Badge<EditEventHandler>)
-{
-    reset_cursor_blink_cycle();
-
-    if (m_cursor_position && is<DOM::Text>(*m_cursor_position->node())) {
-        auto& text_node = static_cast<DOM::Text&>(*m_cursor_position->node());
-        if (auto text_node_owner = text_node.editable_text_node_owner())
-            text_node_owner->did_edit_text_node({});
-    }
-}
-
-void Navigable::reset_cursor_blink_cycle()
-{
-    m_cursor_blink_state = true;
-    m_cursor_blink_timer->restart();
-    if (m_cursor_position && m_cursor_position->node()->paintable())
-        m_cursor_position->node()->paintable()->set_needs_display();
-}
-
 bool Navigable::is_focused() const
 {
     return &m_page->focused_navigable() == this;
-}
-
-void Navigable::set_cursor_position(JS::NonnullGCPtr<DOM::Position> position)
-{
-    if (m_cursor_position && m_cursor_position->equals(position))
-        return;
-
-    if (m_cursor_position && m_cursor_position->node()->paintable())
-        m_cursor_position->node()->paintable()->set_needs_display();
-
-    m_cursor_position = position;
-
-    if (m_cursor_position && m_cursor_position->node()->paintable())
-        m_cursor_position->node()->paintable()->set_needs_display();
-
-    reset_cursor_blink_cycle();
 }
 
 static String visible_text_in_range(DOM::Range const& range)
@@ -2261,22 +2209,6 @@ void Navigable::paste(String const& text)
         return;
 
     m_event_handler.handle_paste(text);
-}
-
-bool Navigable::increment_cursor_position_offset()
-{
-    if (!m_cursor_position->increment_offset())
-        return false;
-    reset_cursor_blink_cycle();
-    return true;
-}
-
-bool Navigable::decrement_cursor_position_offset()
-{
-    if (!m_cursor_position->decrement_offset())
-        return false;
-    reset_cursor_blink_cycle();
-    return true;
 }
 
 }

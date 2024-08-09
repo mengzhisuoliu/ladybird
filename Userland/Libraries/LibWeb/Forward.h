@@ -25,6 +25,7 @@ class XMLDocumentBuilder;
 
 namespace Web::Painting {
 class BackingStore;
+class DisplayList;
 class DisplayListRecorder;
 class SVGGradientPaintStyle;
 using PaintStyle = RefPtr<SVGGradientPaintStyle>;
@@ -119,6 +120,8 @@ class Clip;
 class ColorStyleValue;
 class ConicGradientStyleValue;
 class ContentStyleValue;
+class CounterStyleValue;
+class CounterDefinitionsStyleValue;
 class CustomIdentStyleValue;
 class Display;
 class DisplayStyleValue;
@@ -137,6 +140,7 @@ class FrequencyOrCalculated;
 class FrequencyPercentage;
 class FrequencyStyleValue;
 class GridAutoFlowStyleValue;
+class GridFitContent;
 class GridMinMax;
 class GridRepeat;
 class GridSize;
@@ -311,6 +315,7 @@ class FetchAlgorithms;
 class FetchController;
 class FetchParams;
 class FetchTimingInfo;
+class FetchRecord;
 class HeaderList;
 class IncrementalReadLoopReadRequest;
 class Request;
@@ -355,6 +360,7 @@ class CustomElementRegistry;
 class DecodedImageData;
 class DocumentState;
 class DOMParser;
+class DOMStringList;
 class DOMStringMap;
 class DragEvent;
 class ElementInternals;
@@ -468,7 +474,7 @@ class Plugin;
 class PluginArray;
 class PromiseRejectionEvent;
 class SelectedFile;
-class SharedImageRequest;
+class SharedResourceRequest;
 class Storage;
 class SubmitEvent;
 class TextMetrics;
@@ -576,6 +582,7 @@ class MimeType;
 }
 
 namespace Web::NavigationTiming {
+class PerformanceNavigation;
 class PerformanceTiming;
 }
 
@@ -710,11 +717,15 @@ class Table;
 
 namespace Web::WebAudio {
 class AudioBuffer;
+class AudioBufferSourceNode;
+class AudioDestinationNode;
 class AudioContext;
+class AudioDestinationNode;
 class AudioNode;
 class AudioParam;
 class AudioScheduledSourceNode;
 class BaseAudioContext;
+class BiquadFilterNode;
 class DynamicsCompressorNode;
 class GainNode;
 class OfflineAudioContext;

@@ -30,12 +30,12 @@ ImageStyleValue::~ImageStyleValue() = default;
 
 void ImageStyleValue::load_any_resources(DOM::Document& document)
 {
-    if (m_image_request)
+    if (m_resource_request)
         return;
     m_document = &document;
 
-    m_image_request = HTML::SharedImageRequest::get_or_create(document.realm(), document.page(), m_url);
-    m_image_request->add_callbacks(
+    m_resource_request = HTML::SharedResourceRequest::get_or_create(document.realm(), document.page(), m_url);
+    m_resource_request->add_callbacks(
         [this, weak_this = make_weak_ptr()] {
             if (!weak_this)
                 return;
@@ -43,11 +43,15 @@ void ImageStyleValue::load_any_resources(DOM::Document& document)
             if (!m_document)
                 return;
 
-            // FIXME: Do less than a full repaint if possible?
-            if (auto navigable = m_document->navigable())
-                navigable->set_needs_display();
+            if (auto navigable = m_document->navigable()) {
+                // Once the image has loaded, we need to re-resolve CSS properties that depend on the image's dimensions.
+                m_document->set_needs_to_resolve_paint_only_properties();
 
-            auto image_data = m_image_request->image_data();
+                // FIXME: Do less than a full repaint if possible?
+                navigable->set_needs_display();
+            }
+
+            auto image_data = m_resource_request->image_data();
             if (image_data->is_animated() && image_data->frame_count() > 1) {
                 m_timer = Platform::Timer::create();
                 m_timer->set_interval(image_data->frame_duration(0));
@@ -57,18 +61,18 @@ void ImageStyleValue::load_any_resources(DOM::Document& document)
         },
         nullptr);
 
-    if (m_image_request->needs_fetching()) {
+    if (m_resource_request->needs_fetching()) {
         auto request = HTML::create_potential_CORS_request(document.vm(), m_url, Fetch::Infrastructure::Request::Destination::Image, HTML::CORSSettingAttribute::NoCORS);
         request->set_client(&document.relevant_settings_object());
-        m_image_request->fetch_image(document.realm(), request);
+        m_resource_request->fetch_resource(document.realm(), request);
     }
 }
 
 void ImageStyleValue::animate()
 {
-    if (!m_image_request)
+    if (!m_resource_request)
         return;
-    auto image_data = m_image_request->image_data();
+    auto image_data = m_resource_request->image_data();
     if (!image_data)
         return;
 
@@ -133,19 +137,24 @@ Optional<CSSPixelFraction> ImageStyleValue::natural_aspect_ratio() const
     return {};
 }
 
-void ImageStyleValue::paint(PaintContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering image_rendering, Vector<Gfx::Path> const& clip_paths) const
+void ImageStyleValue::paint(PaintContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering image_rendering) const
 {
     if (auto const* b = bitmap(m_current_frame_index, dest_rect.size().to_type<int>()); b != nullptr) {
         auto scaling_mode = to_gfx_scaling_mode(image_rendering, b->rect(), dest_rect.to_type<int>());
-        context.display_list_recorder().draw_scaled_immutable_bitmap(dest_rect.to_type<int>(), *b, b->rect(), scaling_mode, clip_paths);
+        context.display_list_recorder().draw_scaled_immutable_bitmap(dest_rect.to_type<int>(), *b, b->rect(), scaling_mode);
     }
+}
+
+Gfx::ImmutableBitmap const* ImageStyleValue::current_frame_bitmap(DevicePixelRect const& dest_rect) const
+{
+    return bitmap(m_current_frame_index, dest_rect.size().to_type<int>());
 }
 
 JS::GCPtr<HTML::DecodedImageData> ImageStyleValue::image_data() const
 {
-    if (!m_image_request)
+    if (!m_resource_request)
         return nullptr;
-    return m_image_request->image_data();
+    return m_resource_request->image_data();
 }
 
 Optional<Gfx::Color> ImageStyleValue::color_if_single_pixel_bitmap() const

@@ -32,70 +32,68 @@
 
 namespace Web::Painting {
 
-enum class CommandResult {
-    Continue,
-    SkipStackingContext,
-};
+class DisplayList;
 
 class DisplayListPlayer {
 public:
     virtual ~DisplayListPlayer() = default;
 
-    virtual CommandResult draw_glyph_run(DrawGlyphRun const&) = 0;
-    virtual CommandResult fill_rect(FillRect const&) = 0;
-    virtual CommandResult draw_scaled_bitmap(DrawScaledBitmap const&) = 0;
-    virtual CommandResult draw_scaled_immutable_bitmap(DrawScaledImmutableBitmap const&) = 0;
-    virtual CommandResult save(Save const&) = 0;
-    virtual CommandResult restore(Restore const&) = 0;
-    virtual CommandResult add_clip_rect(AddClipRect const&) = 0;
-    virtual CommandResult push_stacking_context(PushStackingContext const&) = 0;
-    virtual CommandResult pop_stacking_context(PopStackingContext const&) = 0;
-    virtual CommandResult paint_linear_gradient(PaintLinearGradient const&) = 0;
-    virtual CommandResult paint_radial_gradient(PaintRadialGradient const&) = 0;
-    virtual CommandResult paint_conic_gradient(PaintConicGradient const&) = 0;
-    virtual CommandResult paint_outer_box_shadow(PaintOuterBoxShadow const&) = 0;
-    virtual CommandResult paint_inner_box_shadow(PaintInnerBoxShadow const&) = 0;
-    virtual CommandResult paint_text_shadow(PaintTextShadow const&) = 0;
-    virtual CommandResult fill_rect_with_rounded_corners(FillRectWithRoundedCorners const&) = 0;
-    virtual CommandResult fill_path_using_color(FillPathUsingColor const&) = 0;
-    virtual CommandResult fill_path_using_paint_style(FillPathUsingPaintStyle const&) = 0;
-    virtual CommandResult stroke_path_using_color(StrokePathUsingColor const&) = 0;
-    virtual CommandResult stroke_path_using_paint_style(StrokePathUsingPaintStyle const&) = 0;
-    virtual CommandResult draw_ellipse(DrawEllipse const&) = 0;
-    virtual CommandResult fill_ellipse(FillEllipse const&) = 0;
-    virtual CommandResult draw_line(DrawLine const&) = 0;
-    virtual CommandResult apply_backdrop_filter(ApplyBackdropFilter const&) = 0;
-    virtual CommandResult draw_rect(DrawRect const&) = 0;
-    virtual CommandResult draw_triangle_wave(DrawTriangleWave const&) = 0;
-    virtual CommandResult sample_under_corners(SampleUnderCorners const&) = 0;
-    virtual CommandResult blit_corner_clipping(BlitCornerClipping const&) = 0;
+    void execute(DisplayList& display_list);
+
+private:
+    virtual void draw_glyph_run(DrawGlyphRun const&) = 0;
+    virtual void fill_rect(FillRect const&) = 0;
+    virtual void draw_scaled_bitmap(DrawScaledBitmap const&) = 0;
+    virtual void draw_scaled_immutable_bitmap(DrawScaledImmutableBitmap const&) = 0;
+    virtual void draw_repeated_immutable_bitmap(DrawRepeatedImmutableBitmap const&) = 0;
+    virtual void save(Save const&) = 0;
+    virtual void restore(Restore const&) = 0;
+    virtual void add_clip_rect(AddClipRect const&) = 0;
+    virtual void push_stacking_context(PushStackingContext const&) = 0;
+    virtual void pop_stacking_context(PopStackingContext const&) = 0;
+    virtual void paint_linear_gradient(PaintLinearGradient const&) = 0;
+    virtual void paint_radial_gradient(PaintRadialGradient const&) = 0;
+    virtual void paint_conic_gradient(PaintConicGradient const&) = 0;
+    virtual void paint_outer_box_shadow(PaintOuterBoxShadow const&) = 0;
+    virtual void paint_inner_box_shadow(PaintInnerBoxShadow const&) = 0;
+    virtual void paint_text_shadow(PaintTextShadow const&) = 0;
+    virtual void fill_rect_with_rounded_corners(FillRectWithRoundedCorners const&) = 0;
+    virtual void fill_path_using_color(FillPathUsingColor const&) = 0;
+    virtual void fill_path_using_paint_style(FillPathUsingPaintStyle const&) = 0;
+    virtual void stroke_path_using_color(StrokePathUsingColor const&) = 0;
+    virtual void stroke_path_using_paint_style(StrokePathUsingPaintStyle const&) = 0;
+    virtual void draw_ellipse(DrawEllipse const&) = 0;
+    virtual void fill_ellipse(FillEllipse const&) = 0;
+    virtual void draw_line(DrawLine const&) = 0;
+    virtual void apply_backdrop_filter(ApplyBackdropFilter const&) = 0;
+    virtual void draw_rect(DrawRect const&) = 0;
+    virtual void draw_triangle_wave(DrawTriangleWave const&) = 0;
+    virtual void add_rounded_rect_clip(AddRoundedRectClip const&) = 0;
+    virtual void add_mask(AddMask const&) = 0;
     virtual bool would_be_fully_clipped_by_painter(Gfx::IntRect) const = 0;
-    virtual bool needs_prepare_glyphs_texture() const { return false; }
-    virtual void prepare_glyph_texture(HashMap<Gfx::Font const*, HashTable<u32>> const& unique_glyphs) = 0;
-    virtual void prepare_to_execute([[maybe_unused]] size_t corner_clip_max_depth) { }
-    virtual bool needs_update_immutable_bitmap_texture_cache() const = 0;
-    virtual void update_immutable_bitmap_texture_cache(HashMap<u32, Gfx::ImmutableBitmap const*>&) = 0;
 };
 
-class DisplayList {
+class DisplayList : public RefCounted<DisplayList> {
 public:
+    static NonnullRefPtr<DisplayList> create()
+    {
+        return adopt_ref(*new DisplayList());
+    }
+
     void append(Command&& command, Optional<i32> scroll_frame_id);
 
     void apply_scroll_offsets(Vector<Gfx::IntPoint> const& offsets_by_frame_id);
-    void mark_unnecessary_commands();
-    void execute(DisplayListPlayer&);
 
-    size_t corner_clip_max_depth() const { return m_corner_clip_max_depth; }
-    void set_corner_clip_max_depth(size_t depth) { m_corner_clip_max_depth = depth; }
-
-private:
     struct CommandListItem {
         Optional<i32> scroll_frame_id;
         Command command;
-        bool skip { false };
     };
 
-    size_t m_corner_clip_max_depth { 0 };
+    AK::SegmentedVector<CommandListItem, 512> const& commands() const { return m_commands; }
+
+private:
+    DisplayList() = default;
+
     AK::SegmentedVector<CommandListItem, 512> m_commands;
 };
 

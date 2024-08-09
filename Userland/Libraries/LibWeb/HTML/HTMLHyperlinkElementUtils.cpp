@@ -97,7 +97,7 @@ String HTMLHyperlinkElementUtils::username() const
         return String {};
 
     // 3. Return this element's url's username.
-    return m_url->username().release_value();
+    return m_url->username();
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#dom-hyperlink-username
@@ -134,7 +134,7 @@ String HTMLHyperlinkElementUtils::password() const
         return String {};
 
     // 4. Return url's password.
-    return url->password().release_value();
+    return url->password();
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#dom-hyperlink-password
@@ -291,10 +291,8 @@ String HTMLHyperlinkElementUtils::pathname() const
     if (!m_url.has_value())
         return String {};
 
-    // 4. If url's cannot-be-a-base-URL is true, then return url's path[0].
-    // 5. If url's path is empty, then return the empty string.
-    // 6. Return "/", followed by the strings in url's path (including empty strings), separated from each other by "/".
-    return MUST(String::from_byte_string(m_url->serialize_path()));
+    // 4. Return the result of URL path serializing url.
+    return m_url->serialize_path();
 }
 
 // https://html.spec.whatwg.org/multipage/links.html#dom-hyperlink-pathname
@@ -451,6 +449,7 @@ WebIDL::ExceptionOr<void> HTMLHyperlinkElementUtils::set_href(String href)
 void HTMLHyperlinkElementUtils::update_href()
 {
     // To update href, set the element's href content attribute's value to the element's url, serialized.
+    MUST(set_hyperlink_element_utils_href(MUST(String::from_byte_string(m_url->serialize()))));
 }
 
 bool HTMLHyperlinkElementUtils::cannot_navigate() const

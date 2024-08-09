@@ -362,9 +362,17 @@ void Node::set_node_value(Optional<String> const& maybe_value)
 // https://html.spec.whatwg.org/multipage/document-sequences.html#node-navigable
 JS::GCPtr<HTML::Navigable> Node::navigable() const
 {
+    auto& document = const_cast<Document&>(this->document());
+    if (auto cached_navigable = document.cached_navigable()) {
+        if (cached_navigable->active_document() == &document)
+            return cached_navigable;
+    }
+
     // To get the node navigable of a node node, return the navigable whose active document is node's node document,
     // or null if there is no such navigable.
-    return HTML::Navigable::navigable_with_active_document(const_cast<Document&>(document()));
+    auto navigable = HTML::Navigable::navigable_with_active_document(document);
+    document.set_cached_navigable(navigable);
+    return navigable;
 }
 
 void Node::invalidate_style()
@@ -978,12 +986,14 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<Node>> Node::clone_node(Document* document,
         // Set copy’s namespace, namespace prefix, local name, and value to those of node.
         auto& attr = static_cast<Attr&>(*this);
         copy = attr.clone(*document);
-    } else if (is<Text>(this)) {
+    }
+    // NOTE: is<Text>() currently returns true only for text nodes, not for descendant types of Text.
+    else if (is<Text>(this) || is<CDATASection>(this)) {
         // Text
-        auto text = verify_cast<Text>(this);
+        auto& text = static_cast<Text&>(*this);
 
         // Set copy’s data to that of node.
-        auto text_copy = heap().allocate<Text>(realm(), *document, text->data());
+        auto text_copy = heap().allocate<Text>(realm(), *document, text.data());
         copy = move(text_copy);
     } else if (is<Comment>(this)) {
         // Comment
@@ -1038,6 +1048,7 @@ WebIDL::ExceptionOr<JS::NonnullGCPtr<Node>> Node::clone_node(Document* document,
     }
 
     // 7. Return copy.
+    VERIFY(copy);
     return JS::NonnullGCPtr { *copy };
 }
 
@@ -1351,7 +1362,10 @@ void Node::serialize_tree_as_json(JsonObjectSerializer<StringBuilder>& object) c
 
     MUST((object.add("visible"sv, !!layout_node())));
 
-    if (has_child_nodes() || (is_element() && static_cast<DOM::Element const*>(this)->is_shadow_host())) {
+    auto const* element = is_element() ? static_cast<DOM::Element const*>(this) : nullptr;
+
+    if (has_child_nodes()
+        || (element && (element->is_shadow_host() || element->has_pseudo_elements()))) {
         auto children = MUST(object.add_array("children"sv));
         auto add_child = [&children](DOM::Node const& child) {
             if (child.is_uninteresting_whitespace_node())
@@ -1363,9 +1377,7 @@ void Node::serialize_tree_as_json(JsonObjectSerializer<StringBuilder>& object) c
         };
         for_each_child(add_child);
 
-        if (is_element()) {
-            auto const* element = static_cast<DOM::Element const*>(this);
-
+        if (element) {
             // Pseudo-elements don't have DOM nodes,so we have to add them separately.
             element->serialize_pseudo_elements_as_json(children);
 
@@ -1731,6 +1743,57 @@ Optional<String> Node::lookup_namespace_uri(Optional<String> prefix) const
 
     // 2. Return the result of running locate a namespace for this using prefix.
     return locate_a_namespace(prefix);
+}
+
+// https://dom.spec.whatwg.org/#dom-node-lookupprefix
+Optional<String> Node::lookup_prefix(Optional<String> namespace_) const
+{
+    // 1. If namespace is null or the empty string, then return null.
+    if (!namespace_.has_value() || namespace_->is_empty())
+        return {};
+
+    // 2. Switch on the interface this implements:
+
+    // Element
+    if (is<Element>(*this)) {
+        // Return the result of locating a namespace prefix for it using namespace.
+        auto& element = verify_cast<Element>(*this);
+        return element.locate_a_namespace_prefix(namespace_);
+    }
+
+    // Document
+    if (is<Document>(*this)) {
+        // Return the result of locating a namespace prefix for its document element, if its document element is non-null; otherwise null.
+        auto* document_element = verify_cast<Document>(*this).document_element();
+        if (!document_element)
+            return {};
+
+        return document_element->locate_a_namespace_prefix(namespace_);
+    }
+
+    // DocumentType
+    // DocumentFragment
+    if (is<DocumentType>(*this) || is<DocumentFragment>(*this))
+        // Return null
+        return {};
+
+    // Attr
+    if (is<Attr>(*this)) {
+        // Return the result of locating a namespace prefix for its element, if its element is non-null; otherwise null.
+        auto* element = verify_cast<Attr>(*this).owner_element();
+        if (!element)
+            return {};
+
+        return element->locate_a_namespace_prefix(namespace_);
+    }
+
+    // Otherwise
+    // Return the result of locating a namespace prefix for its parent element, if its parent element is non-null; otherwise null.
+    auto* parent_element = this->parent_element();
+    if (!parent_element)
+        return {};
+
+    return parent_element->locate_a_namespace_prefix(namespace_);
 }
 
 // https://dom.spec.whatwg.org/#dom-node-isdefaultnamespace

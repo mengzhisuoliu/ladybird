@@ -6,20 +6,19 @@ set(LADYBIRD_SOURCES
 )
 set(LADYBIRD_HEADERS
     HelperProcess.h
-    Types.h
     Utilities.h
 )
 
 function(create_ladybird_bundle target_name)
     set_target_properties(${target_name} PROPERTIES
         OUTPUT_NAME "Ladybird"
-        MACOSX_BUNDLE_GUI_IDENTIFIER org.SerenityOS.Ladybird
+        MACOSX_BUNDLE_GUI_IDENTIFIER org.ladybird.Ladybird
         MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
         MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
         MACOSX_BUNDLE_INFO_PLIST "${LADYBIRD_SOURCE_DIR}/Ladybird/Info.plist"
         MACOSX_BUNDLE TRUE
         WIN32_EXECUTABLE TRUE
-        XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER org.SerenityOS.Ladybird
+        XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER org.ladybird.Ladybird
     )
 
     if (APPLE)
@@ -78,15 +77,24 @@ if (APPLE)
     target_link_libraries(ladybird PRIVATE LibThreading)
 endif()
 
-target_sources(ladybird PUBLIC FILE_SET ladybird TYPE HEADERS
-    BASE_DIRS ${LADYBIRD_SOURCE_DIR}
-    FILES ${LADYBIRD_HEADERS}
-)
-target_link_libraries(ladybird PRIVATE AK LibCore LibFileSystem LibGfx LibImageDecoderClient LibIPC LibJS LibMain LibWeb LibWebView LibProtocol LibURL)
+if (ENABLE_INSTALL_HEADERS)
+    target_sources(ladybird PUBLIC FILE_SET ladybird TYPE HEADERS
+        BASE_DIRS ${LADYBIRD_SOURCE_DIR}
+        FILES ${LADYBIRD_HEADERS}
+    )
+endif()
 
-target_include_directories(ladybird PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-target_include_directories(ladybird PRIVATE ${LADYBIRD_SOURCE_DIR}/Userland/)
-target_include_directories(ladybird PRIVATE ${LADYBIRD_SOURCE_DIR}/Userland/Services/)
+if (TARGET ladybird_impl)
+    set(LADYBIRD_TARGET ladybird_impl PUBLIC)
+else()
+    set(LADYBIRD_TARGET ladybird PRIVATE)
+endif()
+
+target_link_libraries(${LADYBIRD_TARGET} AK LibCore LibFileSystem LibGfx LibImageDecoderClient LibIPC LibJS LibMain LibWeb LibWebView LibProtocol LibURL)
+
+target_include_directories(${LADYBIRD_TARGET} ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(${LADYBIRD_TARGET} ${LADYBIRD_SOURCE_DIR}/Userland/)
+target_include_directories(${LADYBIRD_TARGET} ${LADYBIRD_SOURCE_DIR}/Userland/Services/)
 
 function(set_helper_process_properties)
     set(targets ${ARGV})

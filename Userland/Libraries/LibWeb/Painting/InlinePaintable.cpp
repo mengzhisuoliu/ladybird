@@ -75,7 +75,7 @@ void InlinePaintable::paint(PaintContext& context, PaintPhase phase) const
             absolute_fragment_rect.set_height(absolute_fragment_rect.height() + box_model().padding.top + box_model().padding.bottom);
 
             auto const& border_radii_data = fragment.border_radii_data();
-            paint_background(context, layout_node(), absolute_fragment_rect, computed_values().background_color(), computed_values().image_rendering(), &computed_values().background_layers(), border_radii_data);
+            paint_background(context, layout_node(), computed_values().image_rendering(), fragment.resolved_background(), border_radii_data);
 
             if (!box_shadow_data().is_empty()) {
                 auto borders_data = BordersData {
@@ -193,8 +193,7 @@ TraversalDecision InlinePaintable::hit_test(CSSPixelPoint position, HitTestType 
         return TraversalDecision::Continue;
 
     auto position_adjusted_by_scroll_offset = position;
-    if (enclosing_scroll_frame_offset().has_value())
-        position_adjusted_by_scroll_offset.translate_by(-enclosing_scroll_frame_offset().value());
+    position_adjusted_by_scroll_offset.translate_by(-enclosing_scroll_frame_offset());
 
     for (auto const& fragment : m_fragments) {
         if (fragment.paintable().stacking_context())
@@ -240,6 +239,93 @@ CSSPixelRect InlinePaintable::bounding_rect() const
         return { containing_block_position_in_absolute_coordinates, { 0, 0 } };
     }
     return bounding_rect;
+}
+
+void InlinePaintable::resolve_paint_properties()
+{
+    auto const& computed_values = this->computed_values();
+    auto const& layout_node = this->layout_node();
+    auto& fragments = this->fragments();
+
+    // Border radii and background layers
+    auto const& top_left_border_radius = computed_values.border_top_left_radius();
+    auto const& top_right_border_radius = computed_values.border_top_right_radius();
+    auto const& bottom_right_border_radius = computed_values.border_bottom_right_radius();
+    auto const& bottom_left_border_radius = computed_values.border_bottom_left_radius();
+    auto containing_block_position_in_absolute_coordinates = containing_block()->absolute_position();
+    for (size_t i = 0; i < fragments.size(); ++i) {
+        auto is_first_fragment = i == 0;
+        auto is_last_fragment = i == fragments.size() - 1;
+        auto& fragment = fragments[i];
+        CSSPixelRect absolute_fragment_rect {
+            containing_block_position_in_absolute_coordinates.translated(fragment.offset()),
+            fragment.size()
+        };
+        if (is_first_fragment) {
+            auto extra_start_width = box_model().padding.left;
+            absolute_fragment_rect.translate_by(-extra_start_width, 0);
+            absolute_fragment_rect.set_width(absolute_fragment_rect.width() + extra_start_width);
+        }
+        if (is_last_fragment) {
+            auto extra_end_width = box_model().padding.right;
+            absolute_fragment_rect.set_width(absolute_fragment_rect.width() + extra_end_width);
+        }
+        auto border_radii_data = normalize_border_radii_data(layout_node,
+            absolute_fragment_rect, top_left_border_radius,
+            top_right_border_radius,
+            bottom_right_border_radius,
+            bottom_left_border_radius);
+        fragment.set_border_radii_data(border_radii_data);
+
+        absolute_fragment_rect.translate_by(0, -box_model().padding.top);
+        absolute_fragment_rect.set_height(absolute_fragment_rect.height() + box_model().padding.top + box_model().padding.bottom);
+
+        auto resolved_background = resolve_background_layers(computed_values.background_layers(), layout_node, computed_values.background_color(), absolute_fragment_rect, border_radii_data);
+        fragment.set_resolved_background(move(resolved_background));
+    }
+
+    auto const& box_shadow_data = computed_values.box_shadow();
+    Vector<Painting::ShadowData> resolved_box_shadow_data;
+    resolved_box_shadow_data.ensure_capacity(box_shadow_data.size());
+    for (auto const& layer : box_shadow_data) {
+        resolved_box_shadow_data.empend(
+            layer.color,
+            layer.offset_x.to_px(layout_node),
+            layer.offset_y.to_px(layout_node),
+            layer.blur_radius.to_px(layout_node),
+            layer.spread_distance.to_px(layout_node),
+            layer.placement == CSS::ShadowPlacement::Outer ? Painting::ShadowPlacement::Outer
+                                                           : Painting::ShadowPlacement::Inner);
+    }
+    set_box_shadow_data(move(resolved_box_shadow_data));
+
+    for (auto const& fragment : fragments) {
+        auto const& text_shadow = fragment.m_layout_node->computed_values().text_shadow();
+        if (!text_shadow.is_empty()) {
+            Vector<Painting::ShadowData> resolved_shadow_data;
+            resolved_shadow_data.ensure_capacity(text_shadow.size());
+            for (auto const& layer : text_shadow) {
+                resolved_shadow_data.empend(
+                    layer.color,
+                    layer.offset_x.to_px(layout_node),
+                    layer.offset_y.to_px(layout_node),
+                    layer.blur_radius.to_px(layout_node),
+                    layer.spread_distance.to_px(layout_node),
+                    Painting::ShadowPlacement::Outer);
+            }
+            const_cast<Painting::PaintableFragment&>(fragment).set_shadows(move(resolved_shadow_data));
+        }
+    }
+
+    // Outlines
+    auto outline_width = computed_values.outline_width().to_px(layout_node);
+    auto outline_data = borders_data_for_outline(layout_node, computed_values.outline_color(), computed_values.outline_style(), outline_width);
+    auto outline_offset = computed_values.outline_offset().to_px(layout_node);
+    set_outline_data(outline_data);
+    set_outline_offset(outline_offset);
+
+    auto combined_transform = compute_combined_css_transform();
+    set_combined_css_transform(combined_transform);
 }
 
 }

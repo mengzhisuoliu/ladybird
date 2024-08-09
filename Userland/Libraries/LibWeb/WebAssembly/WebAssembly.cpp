@@ -45,6 +45,7 @@ void visit_edges(JS::Object& object, JS::Cell::Visitor& visitor)
     if (auto maybe_cache = Detail::s_caches.get(global_object); maybe_cache.has_value()) {
         auto& cache = maybe_cache.release_value();
         visitor.visit(cache.function_instances());
+        visitor.visit(cache.imported_objects());
     }
 }
 
@@ -181,18 +182,22 @@ JS::ThrowCompletionOr<NonnullOwnPtr<Wasm::ModuleInstance>> instantiate_module(JS
             TRY(import_name.type.visit(
                 [&](Wasm::TypeIndex index) -> JS::ThrowCompletionOr<void> {
                     dbgln("Trying to resolve a function {}::{}, type index {}", import_name.module, import_name.name, index.value());
-                    auto& type = module.type(index);
+                    auto& type = module.type_section().types()[index.value()];
                     // FIXME: IsCallable()
                     if (!import_.is_function())
                         return {};
                     auto& function = import_.as_function();
+                    cache.add_imported_object(function);
                     // FIXME: If this is a function created by create_native_function(),
                     //        just extract its address and resolve to that.
                     Wasm::HostFunction host_function {
                         [&](auto&, auto& arguments) -> Wasm::Result {
                             JS::MarkedVector<JS::Value> argument_values { vm.heap() };
-                            for (auto& entry : arguments)
-                                argument_values.append(to_js_value(vm, entry));
+                            size_t index = 0;
+                            for (auto& entry : arguments) {
+                                argument_values.append(to_js_value(vm, entry, type.parameters()[index]));
+                                ++index;
+                            }
 
                             auto result = TRY(JS::call(vm, function, JS::js_undefined(), argument_values.span()));
                             if (type.results().is_empty())
@@ -376,11 +381,13 @@ JS::NativeFunction* create_native_function(JS::VM& vm, Wasm::FunctionAddress add
                 return JS::js_undefined();
 
             if (result.values().size() == 1)
-                return to_js_value(vm, result.values().first());
+                return to_js_value(vm, result.values().first(), type.results().first());
 
-            return JS::Value(JS::Array::create_from<Wasm::Value>(realm, result.values(), [&](Wasm::Value value) {
-                return to_js_value(vm, value);
-            }));
+            VERIFY_NOT_REACHED();
+            // TODO
+            /*return JS::Value(JS::Array::create_from<Wasm::Value>(realm, result.values(), [&](Wasm::Value value) {*/
+            /*    return to_js_value(vm, value);*/
+            /*}));*/
         });
 
     cache.add_function_instance(address, function);
@@ -415,7 +422,7 @@ JS::ThrowCompletionOr<Wasm::Value> to_webassembly_value(JS::VM& vm, JS::Value va
     }
     case Wasm::ValueType::FunctionReference: {
         if (value.is_null())
-            return Wasm::Value { Wasm::ValueType(Wasm::ValueType::FunctionReference), 0ull };
+            return Wasm::Value();
 
         if (value.is_function()) {
             auto& function = value.as_function();
@@ -437,20 +444,23 @@ JS::ThrowCompletionOr<Wasm::Value> to_webassembly_value(JS::VM& vm, JS::Value va
     VERIFY_NOT_REACHED();
 }
 
-JS::Value to_js_value(JS::VM& vm, Wasm::Value& wasm_value)
+JS::Value to_js_value(JS::VM& vm, Wasm::Value& wasm_value, Wasm::ValueType type)
 {
     auto& realm = *vm.current_realm();
-    switch (wasm_value.type().kind()) {
+    switch (type.kind()) {
     case Wasm::ValueType::I64:
-        return realm.heap().allocate<JS::BigInt>(realm, ::Crypto::SignedBigInteger { wasm_value.to<i64>().value() });
+        return realm.heap().allocate<JS::BigInt>(realm, ::Crypto::SignedBigInteger { wasm_value.to<i64>() });
     case Wasm::ValueType::I32:
-        return JS::Value(wasm_value.to<i32>().value());
+        return JS::Value(wasm_value.to<i32>());
     case Wasm::ValueType::F64:
-        return JS::Value(wasm_value.to<double>().value());
+        return JS::Value(wasm_value.to<double>());
     case Wasm::ValueType::F32:
-        return JS::Value(static_cast<double>(wasm_value.to<float>().value()));
+        return JS::Value(static_cast<double>(wasm_value.to<float>()));
     case Wasm::ValueType::FunctionReference: {
-        auto address = wasm_value.to<Wasm::Reference::Func>().value().address;
+        auto ref_ = wasm_value.to<Wasm::Reference>();
+        if (ref_.ref().has<Wasm::Reference::Null>())
+            return JS::js_null();
+        auto address = ref_.ref().get<Wasm::Reference::Func>().address;
         auto& cache = get_cache(realm);
         auto* function = cache.abstract_machine().store().get(address);
         auto name = function->visit(

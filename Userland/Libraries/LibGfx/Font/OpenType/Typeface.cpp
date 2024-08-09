@@ -152,8 +152,14 @@ float be_fword(u8 const* ptr)
 
 ErrorOr<NonnullRefPtr<Typeface>> Typeface::try_load_from_resource(Core::Resource const& resource, unsigned index)
 {
-    auto font = TRY(try_load_from_externally_owned_memory(resource.data(), { .index = index }));
-    font->m_resource = resource;
+    auto font_data = Gfx::FontData::create_from_resource(resource);
+    return try_load_from_font_data(move(font_data), { .index = index });
+}
+
+ErrorOr<NonnullRefPtr<Typeface>> Typeface::try_load_from_font_data(NonnullOwnPtr<Gfx::FontData> font_data, Options options)
+{
+    auto font = TRY(try_load_from_externally_owned_memory(font_data->bytes(), move(options)));
+    font->m_font_data = move(font_data);
     return font;
 }
 
@@ -346,7 +352,9 @@ ErrorOr<NonnullRefPtr<Typeface>> Typeface::try_load_from_offset(ReadonlyBytes bu
         move(prep),
         move(cblc),
         move(cbdt),
-        move(gpos)));
+        move(gpos),
+        buffer.slice(offset),
+        options.index));
 }
 
 Gfx::ScaledFontMetrics Typeface::metrics([[maybe_unused]] float x_scale, float y_scale) const
@@ -556,27 +564,6 @@ bool Typeface::append_glyph_path_to(Gfx::Path& path, u32 glyph_id, float x_scale
 {
     auto ascender_and_descender = resolve_ascender_and_descender();
     return extract_and_append_glyph_path_to(path, glyph_id, ascender_and_descender.ascender, ascender_and_descender.descender, x_scale, y_scale).has_value();
-}
-
-RefPtr<Gfx::Bitmap> Typeface::rasterize_glyph(u32 glyph_id, float x_scale, float y_scale, Gfx::GlyphSubpixelOffset subpixel_offset) const
-{
-    if (auto bitmap = color_bitmap(glyph_id))
-        return bitmap;
-
-    auto ascender_and_descender = resolve_ascender_and_descender();
-    Gfx::Path path;
-    path.move_to(subpixel_offset.to_float_point());
-    auto glyph = extract_and_append_glyph_path_to(path, glyph_id, ascender_and_descender.ascender, ascender_and_descender.descender, x_scale, y_scale);
-    if (!glyph.has_value())
-        return {};
-
-    u32 width = (u32)(ceilf((glyph->xmax() - glyph->xmin()) * x_scale)) + 2;
-    u32 height = (u32)(ceilf((ascender_and_descender.ascender - ascender_and_descender.descender) * y_scale)) + 2;
-    auto bitmap = Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, { width, height }).release_value_but_fixme_should_propagate_errors();
-    Gfx::Painter painter { bitmap };
-    Gfx::AntiAliasingPainter aa_painter(painter);
-    aa_painter.fill_path(path, Gfx::Color::White);
-    return bitmap;
 }
 
 u32 Typeface::glyph_count() const

@@ -11,6 +11,7 @@
 #include <LibWeb/Bindings/ElementPrototype.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/ShadowRootPrototype.h>
+#include <LibWeb/CSS/CountersSet.h>
 #include <LibWeb/CSS/Selector.h>
 #include <LibWeb/CSS/StyleInvalidation.h>
 #include <LibWeb/CSS/StyleProperty.h>
@@ -46,6 +47,15 @@ struct GetHTMLOptions {
 struct ScrollIntoViewOptions : public HTML::ScrollOptions {
     Bindings::ScrollLogicalPosition block { Bindings::ScrollLogicalPosition::Start };
     Bindings::ScrollLogicalPosition inline_ { Bindings::ScrollLogicalPosition::Nearest };
+};
+
+// https://drafts.csswg.org/cssom-view-1/#dictdef-checkvisibilityoptions
+struct CheckVisibilityOptions {
+    bool check_opacity = false;
+    bool check_visibility_css = false;
+    bool content_visibility_auto = false;
+    bool opacity_property = false;
+    bool visibility_property = false;
 };
 
 // https://html.spec.whatwg.org/multipage/custom-elements.html#upgrade-reaction
@@ -95,6 +105,8 @@ public:
     Optional<FlyString> const& prefix() const { return m_qualified_name.prefix(); }
 
     void set_prefix(Optional<FlyString> value);
+
+    Optional<String> locate_a_namespace_prefix(Optional<String> const& namespace_) const;
 
     // NOTE: This is for the JS bindings
     Optional<FlyString> const& namespace_uri() const { return m_qualified_name.namespace_(); }
@@ -174,7 +186,10 @@ public:
     CSS::StyleProperties* computed_css_values() { return m_computed_css_values.ptr(); }
     CSS::StyleProperties const* computed_css_values() const { return m_computed_css_values.ptr(); }
     void set_computed_css_values(RefPtr<CSS::StyleProperties>);
-    NonnullRefPtr<CSS::StyleProperties> resolved_css_values();
+    NonnullRefPtr<CSS::StyleProperties> resolved_css_values(Optional<CSS::Selector::PseudoElement::Type> = {});
+
+    void set_pseudo_element_computed_css_values(CSS::Selector::PseudoElement::Type, RefPtr<CSS::StyleProperties>);
+    RefPtr<CSS::StyleProperties> pseudo_element_computed_css_values(CSS::Selector::PseudoElement::Type);
 
     void reset_animated_css_properties();
 
@@ -203,8 +218,6 @@ public:
     bool is_target() const;
     bool is_document_element() const;
 
-    JS::NonnullGCPtr<HTMLCollection> get_elements_by_class_name(StringView);
-
     bool is_shadow_host() const;
     JS::GCPtr<ShadowRoot> shadow_root() { return m_shadow_root; }
     JS::GCPtr<ShadowRoot const> shadow_root() const { return m_shadow_root; }
@@ -214,7 +227,7 @@ public:
     [[nodiscard]] HashMap<FlyString, CSS::StyleProperty> const& custom_properties(Optional<CSS::Selector::PseudoElement::Type>) const;
 
     // NOTE: The function is wrapped in a JS::HeapFunction immediately.
-    int queue_an_element_task(HTML::Task::Source, Function<void()>);
+    HTML::TaskID queue_an_element_task(HTML::Task::Source, Function<void()>);
 
     bool is_void_element() const;
     bool serializes_as_void() const;
@@ -228,10 +241,11 @@ public:
     virtual void did_receive_focus() { }
     virtual void did_lose_focus() { }
 
-    static JS::GCPtr<Layout::Node> create_layout_node_for_display_type(DOM::Document&, CSS::Display const&, NonnullRefPtr<CSS::StyleProperties>, Element*);
+    static JS::GCPtr<Layout::NodeWithStyle> create_layout_node_for_display_type(DOM::Document&, CSS::Display const&, NonnullRefPtr<CSS::StyleProperties>, Element*);
 
-    void set_pseudo_element_node(Badge<Layout::TreeBuilder>, CSS::Selector::PseudoElement::Type, JS::GCPtr<Layout::Node>);
-    JS::GCPtr<Layout::Node> get_pseudo_element_node(CSS::Selector::PseudoElement::Type) const;
+    void set_pseudo_element_node(Badge<Layout::TreeBuilder>, CSS::Selector::PseudoElement::Type, JS::GCPtr<Layout::NodeWithStyle>);
+    JS::GCPtr<Layout::NodeWithStyle> get_pseudo_element_node(CSS::Selector::PseudoElement::Type) const;
+    bool has_pseudo_elements() const;
     void clear_pseudo_element_nodes(Badge<Layout::TreeBuilder>);
     void serialize_pseudo_elements_as_json(JsonArraySerializer<StringBuilder>& children_array) const;
 
@@ -354,6 +368,8 @@ public:
     void scroll_by(HTML::ScrollToOptions);
     void scroll_by(double x, double y);
 
+    bool check_visibility(Optional<CheckVisibilityOptions>);
+
     void register_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, IntersectionObserver::IntersectionObserverRegistration);
     void unregister_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, JS::NonnullGCPtr<IntersectionObserver::IntersectionObserver>);
     IntersectionObserver::IntersectionObserverRegistration& get_intersection_observer_registration(Badge<DOM::Document>, IntersectionObserver::IntersectionObserver const&);
@@ -389,6 +405,12 @@ public:
 
     void set_in_top_layer(bool in_top_layer) { m_in_top_layer = in_top_layer; }
     bool in_top_layer() const { return m_in_top_layer; }
+
+    bool has_non_empty_counters_set() const { return m_counters_set; }
+    Optional<CSS::CountersSet const&> counters_set();
+    CSS::CountersSet& ensure_counters_set();
+    void resolve_counters(CSS::StyleProperties&);
+    void inherit_counters();
 
 protected:
     Element(Document&, DOM::QualifiedName);
@@ -431,9 +453,17 @@ private:
     RefPtr<CSS::StyleProperties> m_computed_css_values;
     HashMap<FlyString, CSS::StyleProperty> m_custom_properties;
 
-    using PseudoElementCustomProperties = Array<HashMap<FlyString, CSS::StyleProperty>, to_underlying(CSS::Selector::PseudoElement::Type::KnownPseudoElementCount)>;
-    mutable OwnPtr<PseudoElementCustomProperties> m_pseudo_element_custom_properties;
-    PseudoElementCustomProperties& pseudo_element_custom_properties() const;
+    struct PseudoElement {
+        JS::GCPtr<Layout::NodeWithStyle> layout_node;
+        RefPtr<CSS::StyleProperties> computed_css_values;
+        HashMap<FlyString, CSS::StyleProperty> custom_properties;
+    };
+    // TODO: CSS::Selector::PseudoElement::Type includes a lot of pseudo-elements that exist in shadow trees,
+    //       and so we don't want to include data for them here.
+    using PseudoElementData = Array<PseudoElement, to_underlying(CSS::Selector::PseudoElement::Type::KnownPseudoElementCount)>;
+    mutable OwnPtr<PseudoElementData> m_pseudo_element_data;
+    Optional<PseudoElement&> get_pseudo_element(CSS::Selector::PseudoElement::Type) const;
+    PseudoElement& ensure_pseudo_element(CSS::Selector::PseudoElement::Type) const;
 
     Optional<CSS::Selector::PseudoElement::Type> m_use_pseudo_element;
 
@@ -442,9 +472,6 @@ private:
 
     Optional<FlyString> m_id;
     Optional<FlyString> m_name;
-
-    using PseudoElementLayoutNodes = Array<JS::GCPtr<Layout::Node>, to_underlying(CSS::Selector::PseudoElement::Type::KnownPseudoElementCount)>;
-    OwnPtr<PseudoElementLayoutNodes> m_pseudo_element_nodes;
 
     // https://html.spec.whatwg.org/multipage/custom-elements.html#custom-element-reaction-queue
     // All elements have an associated custom element reaction queue, initially empty. Each item in the custom element reaction queue is of one of two types:
@@ -467,6 +494,8 @@ private:
     Array<CSSPixelPoint, 3> m_scroll_offset;
 
     bool m_in_top_layer { false };
+
+    OwnPtr<CSS::CountersSet> m_counters_set;
 };
 
 template<>

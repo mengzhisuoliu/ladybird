@@ -1136,9 +1136,51 @@ Variant<JS::Handle<DOM::Event>, JS::Value> Window::event() const
 // https://w3c.github.io/csswg-drafts/cssom/#dom-window-getcomputedstyle
 JS::NonnullGCPtr<CSS::CSSStyleDeclaration> Window::get_computed_style(DOM::Element& element, Optional<String> const& pseudo_element) const
 {
-    // FIXME: Make this fully spec compliant.
-    (void)pseudo_element;
-    return heap().allocate<CSS::ResolvedCSSStyleDeclaration>(realm(), element);
+    // 1. Let doc be elt’s node document.
+
+    // 2. Let obj be elt.
+    Optional<CSS::Selector::PseudoElement::Type> obj_pseudo;
+
+    // 3. If pseudoElt is provided, is not the empty string, and starts with a colon, then:
+    if (pseudo_element.has_value() && pseudo_element.value().starts_with(':')) {
+        // 1. Parse pseudoElt as a <pseudo-element-selector>, and let type be the result.
+        auto type = parse_pseudo_element_selector(CSS::Parser::ParsingContext(associated_document()), pseudo_element.value());
+
+        // 2. If type is failure, or is an ::slotted() or ::part() pseudo-element, let obj be null.
+        // FIXME: We can't pass a null element to ResolvedCSSStyleDeclaration
+        if (!type.has_value()) {
+        }
+        // 3. Otherwise let obj be the given pseudo-element of elt.
+        else {
+            // TODO: Keep the function arguments of the pseudo-element if there are any.
+            obj_pseudo = type.value().type();
+        }
+    }
+
+    // AD-HOC: Just return a ResolvedCSSStyleDeclaration because that's what we have for now.
+    // FIXME: Implement CSSStyleProperties, and then follow the rest of these steps instead.
+    return heap().allocate<CSS::ResolvedCSSStyleDeclaration>(realm(), element, obj_pseudo);
+
+    // 4. Let decls be an empty list of CSS declarations.
+
+    // 5. If obj is not null, and elt is connected, part of the flat tree, and its shadow-including root
+    //    has a browsing context which either doesn’t have a browsing context container, or whose browsing
+    //    context container is being rendered, set decls to a list of all longhand properties that are
+    //    supported CSS properties, in lexicographical order, with the value being the resolved value
+    //    computed for obj using the style rules associated with doc. Additionally, append to decls all
+    //    the custom properties whose computed value for obj is not the guaranteed-invalid value.
+
+    // 6. Return a live CSSStyleProperties object with the following properties:
+    //    computed flag
+    //        Set.
+    //    readonly flag
+    //        Set.
+    //    declarations
+    //        decls.
+    //    parent CSS rule
+    //        Null.
+    //    owner node
+    //        obj.
 }
 
 // https://w3c.github.io/csswg-drafts/cssom-view/#dom-window-matchmedia
@@ -1438,7 +1480,7 @@ double Window::device_pixel_ratio() const
 }
 
 // https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#dom-animationframeprovider-requestanimationframe
-i32 Window::request_animation_frame(WebIDL::CallbackType& callback)
+WebIDL::UnsignedLong Window::request_animation_frame(WebIDL::CallbackType& callback)
 {
     // FIXME: Make this fully spec compliant. Currently implements a mix of 'requestAnimationFrame()' and 'run the animation frame callbacks'.
     return m_animation_frame_callback_driver.add([this, callback = JS::make_handle(callback)](double now) {
@@ -1450,14 +1492,14 @@ i32 Window::request_animation_frame(WebIDL::CallbackType& callback)
 }
 
 // https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#animationframeprovider-cancelanimationframe
-void Window::cancel_animation_frame(i32 handle)
+void Window::cancel_animation_frame(WebIDL::UnsignedLong handle)
 {
     // 1. If this is not supported, then throw a "NotSupportedError" DOMException.
     // NOTE: Doesn't apply in this Window-specific implementation.
 
     // 2. Let callbacks be this's target object's map of animation frame callbacks.
     // 3. Remove callbacks[handle].
-    m_animation_frame_callback_driver.remove(handle);
+    (void)m_animation_frame_callback_driver.remove(handle);
 }
 
 // https://w3c.github.io/requestidlecallback/#dom-window-requestidlecallback
@@ -1635,7 +1677,7 @@ Vector<FlyString> Window::supported_property_names() const
 }
 
 // https://html.spec.whatwg.org/#named-access-on-the-window-object
-WebIDL::ExceptionOr<JS::Value> Window::named_item_value(FlyString const& name) const
+JS::Value Window::named_item_value(FlyString const& name) const
 {
     // FIXME: Make the const-correctness of the methods this method calls less cowboy.
     auto& mutable_this = const_cast<Window&>(*this);

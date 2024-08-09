@@ -3,6 +3,7 @@
  * Copyright (c) 2022, Matthew Costa <ucosty@gmail.com>
  * Copyright (c) 2022, Filiph Sandström <filiph.sandstrom@filfatstudios.com>
  * Copyright (c) 2023, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2024, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -22,6 +23,7 @@
 #include <LibWeb/CSS/PreferredContrast.h>
 #include <LibWeb/CSS/PreferredMotion.h>
 #include <LibWeb/Loader/UserAgent.h>
+#include <LibWebView/Application.h>
 #include <LibWebView/CookieJar.h>
 #include <LibWebView/UserAgent.h>
 #include <QAction>
@@ -70,12 +72,11 @@ public:
     }
 };
 
-BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, WebView::CookieJar& cookie_jar, WebContentOptions const& web_content_options, StringView webdriver_content_ipc_path, bool allow_popups, Tab* parent_tab, Optional<u64> page_index)
+BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, WebView::CookieJar& cookie_jar, IsPopupWindow is_popup_window, Tab* parent_tab, Optional<u64> page_index)
     : m_tabs_container(new TabWidget(this))
+    , m_new_tab_button_toolbar(new QToolBar("New Tab", m_tabs_container))
     , m_cookie_jar(cookie_jar)
-    , m_web_content_options(web_content_options)
-    , m_webdriver_content_ipc_path(webdriver_content_ipc_path)
-    , m_allow_popups(allow_popups)
+    , m_is_popup_window(is_popup_window)
 {
     setWindowIcon(app_icon());
 
@@ -100,6 +101,18 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, WebView::Cook
     QObject::connect(Settings::the(), &Settings::enable_do_not_track_changed, this, [this](bool enable) {
         for_each_tab([enable](auto& tab) {
             tab.set_enable_do_not_track(enable);
+        });
+    });
+
+    QObject::connect(Settings::the(), &Settings::preferred_languages_changed, this, [this](QStringList languages) {
+        Vector<String> preferred_languages;
+        preferred_languages.ensure_capacity(languages.length());
+        for (auto& language : languages) {
+            preferred_languages.append(ak_string_from_qstring(language));
+        }
+
+        for_each_tab([preferred_languages](auto& tab) {
+            tab.set_preferred_languages(preferred_languages);
         });
     });
 
@@ -350,7 +363,7 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, WebView::Cook
     task_manager_action->setShortcuts({ QKeySequence("Ctrl+Shift+M") });
     inspect_menu->addAction(task_manager_action);
     QObject::connect(task_manager_action, &QAction::triggered, this, [&] {
-        static_cast<Ladybird::Application*>(QApplication::instance())->show_task_manager_window(m_web_content_options);
+        static_cast<Ladybird::Application*>(QApplication::instance())->show_task_manager_window();
     });
 
     auto* debug_menu = m_hamburger_menu->addMenu("&Debug");
@@ -418,6 +431,11 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, WebView::Cook
     QObject::connect(dump_local_storage_action, &QAction::triggered, this, [this] {
         debug_request("dump-local-storage");
     });
+
+    auto* dump_connection_info = new QAction("Dump Co&nnection Info", this);
+    dump_connection_info->setIcon(load_icon_from_uri("resource://icons/16x16/network.png"sv));
+    debug_menu->addAction(dump_connection_info);
+    QObject::connect(dump_connection_info, &QAction::triggered, this, &BrowserWindow::dump_connection_info);
 
     debug_menu->addSeparator();
 
@@ -541,7 +559,7 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, WebView::Cook
 
     m_block_pop_ups_action = new QAction("Block Pop-ups", this);
     m_block_pop_ups_action->setCheckable(true);
-    m_block_pop_ups_action->setChecked(!allow_popups);
+    m_block_pop_ups_action->setChecked(WebView::Application::chrome_options().allow_popups == WebView::AllowPopups::No);
     debug_menu->addAction(m_block_pop_ups_action);
     QObject::connect(m_block_pop_ups_action, &QAction::triggered, this, [this] {
         bool state = m_block_pop_ups_action->isChecked();
@@ -584,7 +602,7 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, WebView::Cook
         tab.focus_location_editor();
     });
     QObject::connect(m_new_window_action, &QAction::triggered, this, [this] {
-        (void)static_cast<Ladybird::Application*>(QApplication::instance())->new_window({}, m_cookie_jar, m_web_content_options, m_webdriver_content_ipc_path, m_allow_popups);
+        (void)static_cast<Ladybird::Application*>(QApplication::instance())->new_window({}, m_cookie_jar);
     });
     QObject::connect(open_file_action, &QAction::triggered, this, &BrowserWindow::open_file);
     QObject::connect(settings_action, &QAction::triggered, this, [this] {
@@ -652,14 +670,16 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, WebView::Cook
     if (parent_tab) {
         new_child_tab(Web::HTML::ActivateTab::Yes, *parent_tab, AK::move(page_index));
     } else {
-        if (initial_urls.is_empty()) {
-            new_tab_from_url(ak_url_from_qstring(Settings::the()->new_tab_page()), Web::HTML::ActivateTab::Yes);
-        } else {
-            for (size_t i = 0; i < initial_urls.size(); ++i) {
-                new_tab_from_url(initial_urls[i], (i == 0) ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No);
-            }
+        for (size_t i = 0; i < initial_urls.size(); ++i) {
+            new_tab_from_url(initial_urls[i], (i == 0) ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No);
         }
     }
+
+    m_new_tab_button_toolbar->addAction(m_new_tab_action);
+    m_new_tab_button_toolbar->setMovable(false);
+    m_new_tab_button_toolbar->setStyleSheet("QToolBar { background: transparent; }");
+    m_new_tab_button_toolbar->setIconSize(QSize(16, 16));
+    m_tabs_container->setCornerWidget(m_new_tab_button_toolbar, Qt::TopRightCorner);
 
     setCentralWidget(m_tabs_container);
     setContextMenuPolicy(Qt::PreventContextMenu);
@@ -705,7 +725,7 @@ Tab& BrowserWindow::create_new_tab(Web::HTML::ActivateTab activate_tab, Tab& par
     if (!page_index.has_value())
         return create_new_tab(activate_tab);
 
-    auto* tab = new Tab(this, m_web_content_options, m_webdriver_content_ipc_path, parent.view().client(), page_index.value());
+    auto* tab = new Tab(this, parent.view().client(), page_index.value());
 
     // FIXME: Merge with other overload
     if (m_current_tab == nullptr) {
@@ -722,7 +742,7 @@ Tab& BrowserWindow::create_new_tab(Web::HTML::ActivateTab activate_tab, Tab& par
 
 Tab& BrowserWindow::create_new_tab(Web::HTML::ActivateTab activate_tab)
 {
-    auto* tab = new Tab(this, m_web_content_options, m_webdriver_content_ipc_path);
+    auto* tab = new Tab(this);
 
     if (m_current_tab == nullptr) {
         set_current_tab(tab);
@@ -754,7 +774,7 @@ void BrowserWindow::initialize_tab(Tab* tab)
 
     tab->view().on_new_web_view = [this, tab](auto activate_tab, Web::HTML::WebViewHints hints, Optional<u64> page_index) {
         if (hints.popup) {
-            auto& window = static_cast<Ladybird::Application*>(QApplication::instance())->new_window({}, m_cookie_jar, m_web_content_options, m_webdriver_content_ipc_path, m_allow_popups, tab, AK::move(page_index));
+            auto& window = static_cast<Ladybird::Application*>(QApplication::instance())->new_window({}, m_cookie_jar, IsPopupWindow::Yes, tab, AK::move(page_index));
             window.set_window_rect(hints.screen_x, hints.screen_y, hints.width, hints.height);
             return window.current_tab()->view().handle();
         }
@@ -806,11 +826,18 @@ void BrowserWindow::initialize_tab(Tab* tab)
     m_tabs_container->setTabIcon(m_tabs_container->indexOf(tab), tab->favicon());
     create_close_button_for_tab(tab);
 
+    Vector<String> preferred_languages;
+    preferred_languages.ensure_capacity(Settings::the()->preferred_languages().length());
+    for (auto& language : Settings::the()->preferred_languages()) {
+        preferred_languages.append(ak_string_from_qstring(language));
+    }
+
     tab->set_line_box_borders(m_show_line_box_borders_action->isChecked());
     tab->set_scripting(m_enable_scripting_action->isChecked());
     tab->set_block_popups(m_block_pop_ups_action->isChecked());
     tab->set_same_origin_policy(m_enable_same_origin_policy_action->isChecked());
     tab->set_user_agent_string(user_agent_string());
+    tab->set_preferred_languages(preferred_languages);
     tab->set_navigator_compatibility_mode(navigator_compatibility_mode());
     tab->set_enable_do_not_track(Settings::the()->enable_do_not_track());
     tab->view().set_preferred_color_scheme(m_preferred_color_scheme);
@@ -1194,13 +1221,21 @@ bool BrowserWindow::eventFilter(QObject* obj, QEvent* event)
 
 void BrowserWindow::closeEvent(QCloseEvent* event)
 {
-    Settings::the()->set_last_position(pos());
-    Settings::the()->set_last_size(size());
-    Settings::the()->set_is_maximized(isMaximized());
+    if (m_is_popup_window == IsPopupWindow::No) {
+        Settings::the()->set_last_position(pos());
+        Settings::the()->set_last_size(size());
+        Settings::the()->set_is_maximized(isMaximized());
+    }
 
     QObject::deleteLater();
 
     QMainWindow::closeEvent(event);
+}
+
+void BrowserWindow::dump_connection_info()
+{
+    if (auto& application = static_cast<Application&>(WebView::Application::the()); application.request_server_client)
+        application.request_server_client->dump_connection_info();
 }
 
 }

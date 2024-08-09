@@ -19,7 +19,6 @@
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Painting/SVGPaintable.h>
 #include <LibWeb/Painting/StackingContext.h>
-#include <LibWeb/Painting/TableBordersPainting.h>
 #include <LibWeb/SVG/SVGMaskElement.h>
 
 namespace Web::Painting {
@@ -134,13 +133,9 @@ void StackingContext::paint_descendants(PaintContext& context, Paintable const& 
         case StackingContextPaintPhase::BackgroundAndBorders:
             if (!child_is_inline_or_replaced && !child.is_floating()) {
                 paint_node(child, context, PaintPhase::Background);
-                bool is_table_with_collapsed_borders = child.display().is_table_inside() && child.computed_values().border_collapse() == CSS::BorderCollapse::Collapse;
-                if (!child.display().is_table_cell() && !is_table_with_collapsed_borders)
-                    paint_node(child, context, PaintPhase::Border);
+                paint_node(child, context, PaintPhase::Border);
                 paint_descendants(context, child, phase);
-                if (child.display().is_table_inside() || child.computed_values().border_collapse() == CSS::BorderCollapse::Collapse) {
-                    paint_table_borders(context, verify_cast<PaintableBox>(child));
-                }
+                paint_node(child, context, PaintPhase::TableCollapsedBorder);
             }
             break;
         case StackingContextPaintPhase::Floats:
@@ -155,8 +150,7 @@ void StackingContext::paint_descendants(PaintContext& context, Paintable const& 
             if (child_is_inline_or_replaced) {
                 paint_node(child, context, PaintPhase::Background);
                 paint_node(child, context, PaintPhase::Border);
-                if (child.display().is_table_inside() && child.computed_values().border_collapse() == CSS::BorderCollapse::Separate)
-                    paint_table_borders(context, verify_cast<PaintableBox>(child));
+                paint_node(child, context, PaintPhase::TableCollapsedBorder);
                 paint_descendants(context, child, StackingContextPaintPhase::BackgroundAndBorders);
             }
             paint_descendants(context, child, phase);
@@ -299,7 +293,6 @@ void StackingContext::paint(PaintContext& context) const
         .opacity = opacity,
         .is_fixed_position = paintable().is_fixed_position(),
         .source_paintable_rect = source_paintable_rect,
-        .image_rendering = paintable().computed_values().image_rendering(),
         .transform = {
             .origin = transform_origin.scaled(to_device_pixels_scale),
             .matrix = matrix_with_scaled_translation(transform_matrix, to_device_pixels_scale),
@@ -322,12 +315,18 @@ void StackingContext::paint(PaintContext& context) const
         }
     }
 
+    auto has_css_transform = paintable().is_paintable_box() && paintable_box().has_css_transform();
     context.display_list_recorder().save();
+    if (has_css_transform) {
+        paintable_box().apply_clip_overflow_rect(context, PaintPhase::Foreground);
+    }
     if (paintable().is_paintable_box() && paintable_box().scroll_frame_id().has_value())
         context.display_list_recorder().set_scroll_frame_id(*paintable_box().scroll_frame_id());
     context.display_list_recorder().push_stacking_context(push_stacking_context_params);
     paint_internal(context);
     context.display_list_recorder().pop_stacking_context();
+    if (has_css_transform)
+        paintable_box().clear_clip_overflow_rect(context, PaintPhase::Foreground);
     context.display_list_recorder().restore();
 }
 
@@ -415,9 +414,21 @@ TraversalDecision StackingContext::hit_test(CSSPixelPoint position, HitTestType 
             return TraversalDecision::Break;
     }
 
+    CSSPixelPoint enclosing_scroll_offset;
+    if (is<PaintableBox>(paintable())) {
+        auto const& paintable_box = static_cast<PaintableBox const&>(paintable());
+        enclosing_scroll_offset = paintable_box.enclosing_scroll_frame_offset();
+    } else if (is<InlinePaintable>(paintable())) {
+        auto const& inline_paintable = static_cast<InlinePaintable const&>(paintable());
+        enclosing_scroll_offset = inline_paintable.enclosing_scroll_frame_offset();
+    }
+
+    auto position_adjusted_by_scroll_offset = transformed_position;
+    position_adjusted_by_scroll_offset.translate_by(-enclosing_scroll_offset);
+
     // 1. the background and borders of the element forming the stacking context.
     if (paintable().is_paintable_box()) {
-        if (paintable_box().absolute_border_box_rect().contains(transformed_position.x(), transformed_position.y())) {
+        if (paintable_box().absolute_border_box_rect().contains(position_adjusted_by_scroll_offset.x(), position_adjusted_by_scroll_offset.y())) {
             auto hit_test_result = HitTestResult { .paintable = const_cast<PaintableBox&>(paintable_box()) };
             if (callback(hit_test_result) == TraversalDecision::Break)
                 return TraversalDecision::Break;

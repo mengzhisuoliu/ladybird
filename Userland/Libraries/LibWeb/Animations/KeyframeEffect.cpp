@@ -540,11 +540,9 @@ static WebIDL::ExceptionOr<Vector<BaseKeyframe>> process_a_keyframes_argument(JS
             if (!property_id.has_value())
                 continue;
 
-            auto maybe_parser = CSS::Parser::Parser::create(CSS::Parser::ParsingContext(realm), value_string);
-            if (maybe_parser.is_error())
-                continue;
+            auto parser = CSS::Parser::Parser::create(CSS::Parser::ParsingContext(realm), value_string);
 
-            if (auto style_value = maybe_parser.release_value().parse_as_css_value(*property_id)) {
+            if (auto style_value = parser.parse_as_css_value(*property_id)) {
                 // Handle 'initial' here so we don't have to get the default value of the property every frame in StyleComputer
                 if (style_value->is_initial())
                     style_value = CSS::property_initial_value(realm, *property_id);
@@ -956,13 +954,12 @@ void KeyframeEffect::update_style_properties()
     if (!target)
         return;
 
-    if (pseudo_element_type().has_value()) {
-        // StyleProperties are not saved for pseudo-elements so there is nothing to patch
-        target->invalidate_style();
-        return;
-    }
+    CSS::StyleProperties* style = nullptr;
+    if (!pseudo_element_type().has_value())
+        style = target->computed_css_values();
+    else
+        style = target->pseudo_element_computed_css_values(pseudo_element_type().value());
 
-    auto* style = target->computed_css_values();
     if (!style)
         return;
 
@@ -980,7 +977,7 @@ void KeyframeEffect::update_style_properties()
         for (auto i = to_underlying(CSS::first_property_id); i <= to_underlying(CSS::last_property_id); ++i) {
             if (element_style->is_property_inherited(static_cast<CSS::PropertyID>(i))) {
                 auto new_value = CSS::StyleComputer::get_inherit_value(document.realm(), static_cast<CSS::PropertyID>(i), &element);
-                element_style->set_property(static_cast<CSS::PropertyID>(i), *new_value, nullptr, CSS::StyleProperties::Inherited::Yes);
+                element_style->set_property(static_cast<CSS::PropertyID>(i), *new_value, CSS::StyleProperties::Inherited::Yes);
             }
         }
 
@@ -990,8 +987,15 @@ void KeyframeEffect::update_style_properties()
 
     auto invalidation = compute_required_invalidation(animated_properties_before_update, style->animated_property_values());
 
-    if (target->layout_node())
-        target->layout_node()->apply_style(*style);
+    if (!pseudo_element_type().has_value()) {
+        if (target->layout_node())
+            target->layout_node()->apply_style(*style);
+    } else {
+        auto pseudo_element_node = target->get_pseudo_element_node(pseudo_element_type().value());
+        if (auto* node_with_style = dynamic_cast<Layout::NodeWithStyle*>(pseudo_element_node.ptr())) {
+            node_with_style->apply_style(*style);
+        }
+    }
 
     if (invalidation.relayout)
         document.set_needs_layout();

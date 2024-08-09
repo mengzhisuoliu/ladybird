@@ -218,15 +218,15 @@ ALWAYS_INLINE static T shuffle_or_0_impl(T a, Control control, IndexSequence<Idx
     using E = ElementOf<T>;
 
     if constexpr (__has_builtin(__builtin_shuffle)) {
-        // GCC does a very bad job at optimizing the masking, while not recognizing the shuffle idiom
-        // So we jinx its __builtin_shuffle to work with out of bounds indices
-        auto mask = (control >= 0) | (control < N);
-        return __builtin_shuffle(a, control & mask) & ~mask;
+        auto vector = __builtin_shuffle(a, control);
+        for (size_t i = 0; i < N; ++i)
+            vector[i] = control[i] < 0 || control[i] >= N ? 0 : vector[i];
+        return vector;
     }
     // 1. Set all out of bounds values to ~0
     // Note: This is done so that  the optimization mentioned down below works
     // Note: Vector compares result in bitmasks, aka all 1s or all 0s per element
-    control |= ~((control > 0) | (control < N));
+    control |= ~((control >= 0) & (control < N));
     // 2. Selectively set out of bounds values to 0
     // Note: Clang successfully optimizes this to a few instructions on x86-ssse3, GCC does not
     //       Vector Optimizations/Instruction-Selection on ArmV8 seem to not be as powerful as of Clang18

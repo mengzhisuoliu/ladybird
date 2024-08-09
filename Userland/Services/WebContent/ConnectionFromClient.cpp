@@ -332,9 +332,10 @@ void ConnectionFromClient::debug_request(u64 page_id, ByteString const& request,
                 if (element->is_element()) {
                     auto styles = doc->style_computer().compute_style(*static_cast<Web::DOM::Element*>(element));
                     dbgln("+ Element {}", element->debug_description());
-                    auto& properties = styles->properties();
-                    for (size_t i = 0; i < properties.size(); ++i)
-                        dbgln("|  {} = {}", Web::CSS::string_from_property_id(static_cast<Web::CSS::PropertyID>(i)), properties[i].style ? properties[i].style->to_string() : ""_string);
+                    for (size_t i = 0; i < Web::CSS::StyleProperties::number_of_properties; ++i) {
+                        auto property = styles->maybe_null_property(static_cast<Web::CSS::PropertyID>(i));
+                        dbgln("|  {} = {}", Web::CSS::string_from_property_id(static_cast<Web::CSS::PropertyID>(i)), property ? property->to_string() : ""_string);
+                    }
                     dbgln("---");
                 }
             }
@@ -452,7 +453,7 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, i32 node_id, Optional<W
     Web::DOM::Node* node = Web::DOM::Node::from_unique_id(node_id);
     // Note: Nodes without layout (aka non-visible nodes, don't have style computed)
     if (!node || !node->layout_node()) {
-        async_did_inspect_dom_node(page_id, false, {}, {}, {}, {}, {});
+        async_did_inspect_dom_node(page_id, false, {}, {}, {}, {}, {}, {});
         return;
     }
 
@@ -461,7 +462,7 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, i32 node_id, Optional<W
     if (node->is_element()) {
         auto& element = verify_cast<Web::DOM::Element>(*node);
         if (!element.computed_css_values()) {
-            async_did_inspect_dom_node(page_id, false, {}, {}, {}, {}, {});
+            async_did_inspect_dom_node(page_id, false, {}, {}, {}, {}, {}, {});
             return;
         }
 
@@ -545,23 +546,39 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, i32 node_id, Optional<W
             return builder.to_byte_string();
         };
 
+        auto serialize_fonts_json = [](Web::CSS::StyleProperties const& properties) -> ByteString {
+            StringBuilder builder;
+            auto serializer = MUST(JsonArraySerializer<>::try_create(builder));
+
+            auto const& font_list = properties.computed_font_list();
+            font_list.for_each_font_entry([&serializer](Gfx::FontCascadeList::Entry const& entry) {
+                auto const& font = entry.font;
+                auto font_json_object = MUST(serializer.add_object());
+                MUST(font_json_object.add("name"sv, font->family()));
+                MUST(font_json_object.add("size"sv, font->point_size()));
+                MUST(font_json_object.add("weight"sv, font->weight()));
+                MUST(font_json_object.add("variant"sv, font->variant()));
+                MUST(font_json_object.finish());
+            });
+            MUST(serializer.finish());
+            return builder.to_byte_string();
+        };
+
         if (pseudo_element.has_value()) {
             auto pseudo_element_node = element.get_pseudo_element_node(pseudo_element.value());
             if (!pseudo_element_node) {
-                async_did_inspect_dom_node(page_id, false, {}, {}, {}, {}, {});
+                async_did_inspect_dom_node(page_id, false, {}, {}, {}, {}, {}, {});
                 return;
             }
 
-            // FIXME: Pseudo-elements only exist as Layout::Nodes, which don't have style information
-            //        in a format we can use. So, we run the StyleComputer again to get the specified
-            //        values, and have to ignore the computed values and custom properties.
-            auto pseudo_element_style = page->page().focused_navigable().active_document()->style_computer().compute_style(element, pseudo_element);
-            ByteString computed_values = serialize_json(pseudo_element_style);
-            ByteString resolved_values = "{}";
+            auto pseudo_element_style = element.pseudo_element_computed_css_values(pseudo_element.value());
+            ByteString computed_values = serialize_json(*pseudo_element_style);
+            ByteString resolved_values = serialize_json(*element.resolved_css_values(pseudo_element.value()));
             ByteString custom_properties_json = serialize_custom_properties_json(element, pseudo_element);
             ByteString node_box_sizing_json = serialize_node_box_sizing_json(pseudo_element_node.ptr());
+            ByteString fonts_json = serialize_fonts_json(*pseudo_element_style);
 
-            async_did_inspect_dom_node(page_id, true, move(computed_values), move(resolved_values), move(custom_properties_json), move(node_box_sizing_json), {});
+            async_did_inspect_dom_node(page_id, true, move(computed_values), move(resolved_values), move(custom_properties_json), move(node_box_sizing_json), {}, move(fonts_json));
             return;
         }
 
@@ -570,12 +587,13 @@ void ConnectionFromClient::inspect_dom_node(u64 page_id, i32 node_id, Optional<W
         ByteString custom_properties_json = serialize_custom_properties_json(element, {});
         ByteString node_box_sizing_json = serialize_node_box_sizing_json(element.layout_node());
         ByteString aria_properties_state_json = serialize_aria_properties_state_json(element);
+        ByteString fonts_json = serialize_fonts_json(*element.computed_css_values());
 
-        async_did_inspect_dom_node(page_id, true, move(computed_values), move(resolved_values), move(custom_properties_json), move(node_box_sizing_json), move(aria_properties_state_json));
+        async_did_inspect_dom_node(page_id, true, move(computed_values), move(resolved_values), move(custom_properties_json), move(node_box_sizing_json), move(aria_properties_state_json), move(fonts_json));
         return;
     }
 
-    async_did_inspect_dom_node(page_id, false, {}, {}, {}, {}, {});
+    async_did_inspect_dom_node(page_id, false, {}, {}, {}, {}, {}, {});
 }
 
 void ConnectionFromClient::inspect_accessibility_tree(u64 page_id)
@@ -650,8 +668,10 @@ void ConnectionFromClient::add_dom_node_attributes(u64 page_id, i32 node_id, Vec
 
     auto& element = static_cast<Web::DOM::Element&>(*dom_node);
 
-    for (auto const& attribute : attributes)
-        element.set_attribute(attribute.name, attribute.value).release_value_but_fixme_should_propagate_errors();
+    for (auto const& attribute : attributes) {
+        // NOTE: We ignore invalid attributes for now, but we may want to send feedback to the user that this failed.
+        (void)element.set_attribute(attribute.name, attribute.value);
+    }
 
     async_did_finish_editing_dom_node(page_id, element.unique_id());
 }
@@ -671,7 +691,8 @@ void ConnectionFromClient::replace_dom_node_attribute(u64 page_id, i32 node_id, 
         if (should_remove_attribute && Web::Infra::is_ascii_case_insensitive_match(name, attribute.name))
             should_remove_attribute = false;
 
-        element.set_attribute(attribute.name, attribute.value).release_value_but_fixme_should_propagate_errors();
+        // NOTE: We ignore invalid attributes for now, but we may want to send feedback to the user that this failed.
+        (void)element.set_attribute(attribute.name, attribute.value);
     }
 
     if (should_remove_attribute)
@@ -944,6 +965,15 @@ void ConnectionFromClient::set_preferred_motion(u64 page_id, Web::CSS::Preferred
 {
     if (auto page = this->page(page_id); page.has_value())
         page->set_preferred_motion(motion);
+}
+
+void ConnectionFromClient::set_preferred_languages(u64, Vector<String> const& preferred_languages)
+{
+    // FIXME: Whenever the user agent needs to make the navigator.languages attribute of a Window or WorkerGlobalScope
+    // object global return a new set of language tags, the user agent must queue a global task on the DOM manipulation
+    // task source given global to fire an event named languagechange at global, and wait until that task begins to be
+    // executed before actually returning a new value.
+    Web::ResourceLoader::the().set_preferred_languages(preferred_languages);
 }
 
 void ConnectionFromClient::set_enable_do_not_track(u64, bool enable)

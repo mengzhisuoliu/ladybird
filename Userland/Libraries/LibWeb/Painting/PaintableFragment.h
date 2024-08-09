@@ -8,13 +8,15 @@
 
 #include <LibWeb/Layout/LineBoxFragment.h>
 #include <LibWeb/Layout/Node.h>
+#include <LibWeb/Painting/BackgroundPainting.h>
 #include <LibWeb/Painting/BorderRadiiData.h>
 #include <LibWeb/PixelUnits.h>
 
 namespace Web::Painting {
 
 class PaintableFragment {
-    friend class ViewportPaintable;
+    friend class InlinePaintable;
+    friend class PaintableWithLines;
 
 public:
     explicit PaintableFragment(Layout::LineBoxFragment const&);
@@ -35,6 +37,9 @@ public:
 
     Vector<ShadowData> const& shadows() const { return m_shadows; }
     void set_shadows(Vector<ShadowData>&& shadows) { m_shadows = shadows; }
+
+    ResolvedBackground const& resolved_background() const { return m_resolved_background; }
+    void set_resolved_background(ResolvedBackground resolved_background) { m_resolved_background = resolved_background; }
 
     CSSPixelRect const absolute_rect() const;
 
@@ -59,6 +64,7 @@ private:
     Painting::BorderRadiiData m_border_radii_data;
     RefPtr<Gfx::GlyphRun> m_glyph_run;
     Vector<ShadowData> m_shadows;
+    ResolvedBackground m_resolved_background;
 };
 
 }

@@ -14,7 +14,7 @@
 #include <LibURL/URL.h>
 #include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
-#include <LibWeb/HTML/SharedImageRequest.h>
+#include <LibWeb/HTML/SharedResourceRequest.h>
 
 namespace Web::CSS {
 
@@ -32,7 +32,7 @@ public:
     {
         // FIXME: visit_edges in non-GC allocated classes is confusing pattern.
         //        Consider making StyleValue to be GC allocated instead.
-        visitor.visit(m_image_request);
+        visitor.visit(m_resource_request);
     }
 
     virtual String to_string() const override;
@@ -45,9 +45,10 @@ public:
     Optional<CSSPixelFraction> natural_aspect_ratio() const override;
 
     virtual bool is_paintable() const override;
-    void paint(PaintContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering image_rendering, Vector<Gfx::Path> const& clip_paths = {}) const override;
+    void paint(PaintContext& context, DevicePixelRect const& dest_rect, CSS::ImageRendering image_rendering) const override;
 
     virtual Optional<Gfx::Color> color_if_single_pixel_bitmap() const override;
+    Gfx::ImmutableBitmap const* current_frame_bitmap(DevicePixelRect const& dest_rect) const;
 
     Function<void()> on_animate;
 
@@ -56,7 +57,7 @@ public:
 private:
     ImageStyleValue(URL::URL const&);
 
-    JS::GCPtr<HTML::SharedImageRequest> m_image_request;
+    JS::GCPtr<HTML::SharedResourceRequest> m_resource_request;
 
     void animate();
     Gfx::ImmutableBitmap const* bitmap(size_t frame_index, Gfx::IntSize = {}) const;

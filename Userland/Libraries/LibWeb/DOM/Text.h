@@ -15,7 +15,7 @@ namespace Web::DOM {
 class EditableTextNodeOwner {
 public:
     virtual ~EditableTextNodeOwner() = default;
-    virtual void did_edit_text_node(Badge<HTML::Navigable>) = 0;
+    virtual void did_edit_text_node(Badge<Document>) = 0;
 };
 
 class Text
@@ -43,6 +43,7 @@ public:
     EditableTextNodeOwner* editable_text_node_owner();
 
     WebIDL::ExceptionOr<JS::NonnullGCPtr<Text>> split_text(size_t offset);
+    String whole_text();
 
     bool is_password_input() const { return m_is_password_input; }
     void set_is_password_input(Badge<HTML::HTMLInputElement>, bool b) { m_is_password_input = b; }

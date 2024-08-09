@@ -71,15 +71,22 @@ void HTMLSelectElement::adjust_computed_style(CSS::StyleProperties& style)
         style.set_property(CSS::PropertyID::Display, CSS::DisplayStyleValue::create(CSS::Display::from_short(CSS::Display::Short::InlineBlock)));
 }
 
-// https://html.spec.whatwg.org/multipage/form-elements.html#dom-select-size
+// https://html.spec.whatwg.org/multipage/form-elements.html#concept-select-size
 WebIDL::UnsignedLong HTMLSelectElement::size() const
 {
     // The size IDL attribute must reflect the respective content attributes of the same name. The size IDL attribute has a default value of 0.
     if (auto size_string = get_attribute(HTML::AttributeNames::size); size_string.has_value()) {
+        // The display size of a select element is the result of applying the rules for parsing non-negative integers
+        // to the value of element's size attribute, if it has one and parsing it is successful.
         if (auto size = parse_non_negative_integer(*size_string); size.has_value())
             return *size;
     }
-    return 0;
+
+    // If applying those rules to the attribute's value is not successful or if the size attribute is absent,
+    // then the element's display size is 4 if the element's multiple content attribute is present, and 1 otherwise.
+    if (has_attribute(AttributeNames::multiple))
+        return 4;
+    return 1;
 }
 
 WebIDL::ExceptionOr<void> HTMLSelectElement::set_size(WebIDL::UnsignedLong size)
@@ -133,7 +140,11 @@ HTMLOptionElement* HTMLSelectElement::named_item(FlyString const& name)
 WebIDL::ExceptionOr<void> HTMLSelectElement::add(HTMLOptionOrOptGroupElement element, Optional<HTMLElementOrElementIndex> before)
 {
     // Similarly, the add(element, before) method must act like its namesake method on that same options collection.
-    return const_cast<HTMLOptionsCollection&>(*options()).add(move(element), move(before));
+    TRY(const_cast<HTMLOptionsCollection&>(*options()).add(move(element), move(before)));
+
+    update_selectedness(); // Not in spec
+
+    return {};
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-select-remove
@@ -472,14 +483,7 @@ void HTMLSelectElement::form_associated_element_was_inserted()
 
     // Wait until children are ready
     queue_an_element_task(HTML::Task::Source::Microtask, [this] {
-        // Select first option when no other option is selected
-        if (selected_index() == -1) {
-            auto options = list_of_options();
-            if (options.size() > 0) {
-                options.at(0)->set_selected(true);
-            }
-        }
-        update_inner_text_element();
+        update_selectedness();
     });
 }
 
@@ -548,5 +552,59 @@ void HTMLSelectElement::update_inner_text_element()
             return;
         }
     }
+}
+
+// https://html.spec.whatwg.org/multipage/form-elements.html#selectedness-setting-algorithm
+void HTMLSelectElement::update_selectedness()
+{
+    if (has_attribute(AttributeNames::multiple))
+        return;
+
+    // If element's multiple attribute is absent, and element's display size is 1,
+    if (size() == 1) {
+        bool has_selected_elements = false;
+        for (auto const& option_element : list_of_options()) {
+            if (option_element->selected()) {
+                has_selected_elements = true;
+                break;
+            }
+        }
+
+        // and no option elements in the element's list of options have their selectedness set to true,
+        if (!has_selected_elements) {
+            // then set the selectedness of the first option element in the list of options in tree order
+            // that is not disabled, if any, to true, and return.
+            for (auto const& option_element : list_of_options()) {
+                if (!option_element->disabled()) {
+                    option_element->set_selected_internal(true);
+                    update_inner_text_element();
+                    return;
+                }
+            }
+        }
+    }
+
+    // If element's multiple attribute is absent,
+    // and two or more option elements in element's list of options have their selectedness set to true,
+    // then set the selectedness of all but the last option element with its selectedness set to true
+    // in the list of options in tree order to false.
+    int number_of_selected = 0;
+    for (auto const& option_element : list_of_options()) {
+        if (option_element->selected())
+            ++number_of_selected;
+    }
+    // and two or more option elements in element's list of options have their selectedness set to true,
+    if (number_of_selected >= 2) {
+        // then set the selectedness of all but the last option element with its selectedness set to true
+        // in the list of options in tree order to false.
+        for (auto const& option_element : list_of_options()) {
+            if (number_of_selected == 1) {
+                break;
+            }
+            option_element->set_selected_internal(false);
+            --number_of_selected;
+        }
+    }
+    update_inner_text_element();
 }
 }

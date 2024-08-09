@@ -16,9 +16,11 @@
 #include <LibWeb/Layout/BlockContainer.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Painting/BackgroundPainting.h>
-#include <LibWeb/Painting/FilterPainting.h>
 #include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/SVGPaintable.h>
+#include <LibWeb/Painting/SVGSVGPaintable.h>
 #include <LibWeb/Painting/StackingContext.h>
+#include <LibWeb/Painting/TableBordersPainting.h>
 #include <LibWeb/Painting/TextPaintable.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/Platform/FontPlugin.h>
@@ -82,8 +84,10 @@ void PaintableBox::set_scroll_offset(CSSPixelPoint offset)
     document().set_needs_to_refresh_clip_state(true);
     document().set_needs_to_refresh_scroll_state(true);
 
-    auto max_x_offset = scrollable_overflow_rect->width() - content_size().width();
-    auto max_y_offset = scrollable_overflow_rect->height() - content_size().height();
+    auto padding_rect = absolute_padding_box_rect();
+    auto max_x_offset = max(scrollable_overflow_rect->width() - padding_rect.width(), 0);
+    auto max_y_offset = max(scrollable_overflow_rect->height() - padding_rect.height(), 0);
+
     offset.set_x(clamp(offset.x(), 0, max_x_offset));
     offset.set_y(clamp(offset.y(), 0, max_y_offset));
 
@@ -154,13 +158,10 @@ CSSPixelRect PaintableBox::compute_absolute_rect() const
     return rect;
 }
 
-CSSPixelRect PaintableBox::compute_absolute_padding_rect_with_css_transform_applied() const
+CSSPixelRect PaintableBox::compute_absolute_padding_rect_with_scroll_offset_applied() const
 {
     auto rect = absolute_rect();
-    auto scroll_offset = this->enclosing_scroll_frame_offset();
-    if (scroll_offset.has_value())
-        rect.translate_by(scroll_offset.value());
-    rect.translate_by(combined_css_transform().translation().to_type<CSSPixels>());
+    rect.translate_by(enclosing_scroll_frame_offset());
 
     CSSPixelRect padding_rect;
     padding_rect.set_x(rect.x() - box_model().padding.left);
@@ -229,7 +230,9 @@ void PaintableBox::before_paint(PaintContext& context, [[maybe_unused]] PaintPha
     if (!is_visible())
         return;
 
-    apply_clip_overflow_rect(context, phase);
+    if (!has_css_transform()) {
+        apply_clip_overflow_rect(context, phase);
+    }
     apply_scroll_offset(context, phase);
 }
 
@@ -239,7 +242,9 @@ void PaintableBox::after_paint(PaintContext& context, [[maybe_unused]] PaintPhas
         return;
 
     reset_scroll_offset(context, phase);
-    clear_clip_overflow_rect(context, phase);
+    if (!has_css_transform()) {
+        clear_clip_overflow_rect(context, phase);
+    }
 }
 
 bool PaintableBox::is_scrollable(ScrollDirection direction) const
@@ -306,8 +311,13 @@ void PaintableBox::paint(PaintContext& context, PaintPhase phase) const
         paint_box_shadow(context);
     }
 
-    if (phase == PaintPhase::Border) {
+    auto const is_table_with_collapsed_borders = display().is_table_inside() && computed_values().border_collapse() == CSS::BorderCollapse::Collapse;
+    if (!display().is_table_cell() && !is_table_with_collapsed_borders && phase == PaintPhase::Border) {
         paint_border(context);
+    }
+
+    if ((display().is_table_inside() || computed_values().border_collapse() == CSS::BorderCollapse::Collapse) && phase == PaintPhase::TableCollapsedBorder) {
+        paint_table_borders(context, *this);
     }
 
     if (phase == PaintPhase::Outline) {
@@ -434,9 +444,15 @@ void PaintableBox::paint_border(PaintContext& context) const
 
 void PaintableBox::paint_backdrop_filter(PaintContext& context) const
 {
-    auto& backdrop_filter = computed_values().backdrop_filter();
-    if (!backdrop_filter.is_none())
-        apply_backdrop_filter(context, absolute_border_box_rect(), normalized_border_radii_data(), backdrop_filter);
+    auto const& backdrop_filter = computed_values().backdrop_filter();
+    if (backdrop_filter.is_none()) {
+        return;
+    }
+
+    auto backdrop_region = context.rounded_device_rect(absolute_border_box_rect());
+    auto border_radii_data = normalized_border_radii_data();
+    ScopedCornerRadiusClip corner_clipper { context, backdrop_region, border_radii_data };
+    context.display_list_recorder().apply_backdrop_filter(backdrop_region.to_type<int>(), border_radii_data, backdrop_filter);
 }
 
 void PaintableBox::paint_background(PaintContext& context) const
@@ -445,30 +461,7 @@ void PaintableBox::paint_background(PaintContext& context) const
     if (layout_box().is_body() && document().html_element()->should_use_body_background_properties())
         return;
 
-    CSSPixelRect background_rect;
-    Color background_color = computed_values().background_color();
-    auto* background_layers = &computed_values().background_layers();
-
-    if (layout_box().is_root_element()) {
-        // CSS 2.1 Appendix E.2: If the element is a root element, paint the background over the entire canvas.
-        background_rect = context.css_viewport_rect();
-
-        // Section 2.11.2: If the computed value of background-image on the root element is none and its background-color is transparent,
-        // user agents must instead propagate the computed values of the background properties from that element’s first HTML BODY child element.
-        if (document().html_element()->should_use_body_background_properties()) {
-            background_layers = document().background_layers();
-            background_color = document().background_color();
-        }
-    } else {
-        background_rect = absolute_padding_box_rect();
-    }
-
-    // HACK: If the Box has a border, use the bordered_rect to paint the background.
-    //       This way if we have a border-radius there will be no gap between the filling and actual border.
-    if (computed_values().border_top().width != 0 || computed_values().border_right().width != 0 || computed_values().border_bottom().width != 0 || computed_values().border_left().width != 0)
-        background_rect = absolute_border_box_rect();
-
-    Painting::paint_background(context, layout_box(), background_rect, background_color, computed_values().image_rendering(), background_layers, normalized_border_radii_data());
+    Painting::paint_background(context, layout_box(), computed_values().image_rendering(), m_resolved_background, normalized_border_radii_data());
 }
 
 void PaintableBox::paint_box_shadow(PaintContext& context) const
@@ -510,47 +503,30 @@ void PaintableBox::reset_scroll_offset(PaintContext& context, PaintPhase) const
 
 void PaintableBox::apply_clip_overflow_rect(PaintContext& context, PaintPhase phase) const
 {
-    if (!AK::first_is_one_of(phase, PaintPhase::Background, PaintPhase::Border, PaintPhase::Foreground, PaintPhase::Outline))
+    if (!AK::first_is_one_of(phase, PaintPhase::Background, PaintPhase::Border, PaintPhase::TableCollapsedBorder, PaintPhase::Foreground, PaintPhase::Outline))
         return;
 
     if (clip_rect().has_value()) {
         auto overflow_clip_rect = clip_rect().value();
-        m_clipping_overflow = true;
         context.display_list_recorder().save();
         context.display_list_recorder().add_clip_rect(context.enclosing_device_rect(overflow_clip_rect).to_type<int>());
         auto const& border_radii_clips = this->border_radii_clips();
-        m_corner_clipper_ids.resize(border_radii_clips.size());
-        auto const& combined_transform = combined_css_transform();
         for (size_t corner_clip_index = 0; corner_clip_index < border_radii_clips.size(); ++corner_clip_index) {
             auto const& corner_clip = border_radii_clips[corner_clip_index];
             auto corners = corner_clip.radii.as_corners(context);
             if (!corners.has_any_radius())
                 continue;
-            auto corner_clipper_id = context.allocate_corner_clipper_id();
-            m_corner_clipper_ids[corner_clip_index] = corner_clipper_id;
-            auto rect = corner_clip.rect.translated(-combined_transform.translation().to_type<CSSPixels>());
-            context.display_list_recorder().sample_under_corners(corner_clipper_id, corner_clip.radii.as_corners(context), context.rounded_device_rect(rect).to_type<int>(), CornerClip::Outside);
+            context.display_list_recorder().add_rounded_rect_clip(corner_clip.radii.as_corners(context), context.rounded_device_rect(corner_clip.rect).to_type<int>(), CornerClip::Outside);
         }
     }
 }
 
 void PaintableBox::clear_clip_overflow_rect(PaintContext& context, PaintPhase phase) const
 {
-    if (!AK::first_is_one_of(phase, PaintPhase::Background, PaintPhase::Border, PaintPhase::Foreground, PaintPhase::Outline))
+    if (!AK::first_is_one_of(phase, PaintPhase::Background, PaintPhase::Border, PaintPhase::TableCollapsedBorder, PaintPhase::Foreground, PaintPhase::Outline))
         return;
 
-    if (m_clipping_overflow) {
-        m_clipping_overflow = false;
-        auto const& border_radii_clips = this->border_radii_clips();
-        for (int corner_clip_index = border_radii_clips.size() - 1; corner_clip_index >= 0; --corner_clip_index) {
-            auto const& corner_clip = border_radii_clips[corner_clip_index];
-            auto corners = corner_clip.radii.as_corners(context);
-            if (!corners.has_any_radius())
-                continue;
-            auto corner_clipper_id = m_corner_clipper_ids[corner_clip_index];
-            m_corner_clipper_ids[corner_clip_index] = corner_clipper_id;
-            context.display_list_recorder().blit_corner_clipping(corner_clipper_id);
-        }
+    if (clip_rect().has_value()) {
         context.display_list_recorder().restore();
     }
 }
@@ -558,18 +534,19 @@ void PaintableBox::clear_clip_overflow_rect(PaintContext& context, PaintPhase ph
 void paint_cursor_if_needed(PaintContext& context, TextPaintable const& paintable, PaintableFragment const& fragment)
 {
     auto const& navigable = *paintable.navigable();
+    auto const& document = paintable.document();
 
     if (!navigable.is_focused())
         return;
 
-    if (!navigable.cursor_blink_state())
+    if (!document.cursor_blink_state())
         return;
 
-    if (navigable.cursor_position()->node() != paintable.dom_node())
+    if (document.cursor_position()->node() != paintable.dom_node())
         return;
 
     // NOTE: This checks if the cursor is before the start or after the end of the fragment. If it is at the end, after all text, it should still be painted.
-    if (navigable.cursor_position()->offset() < (unsigned)fragment.start() || navigable.cursor_position()->offset() > (unsigned)(fragment.start() + fragment.length()))
+    if (document.cursor_position()->offset() < (unsigned)fragment.start() || document.cursor_position()->offset() > (unsigned)(fragment.start() + fragment.length()))
         return;
 
     if (!fragment.layout_node().dom_node() || !fragment.layout_node().dom_node()->is_editable())
@@ -579,7 +556,7 @@ void paint_cursor_if_needed(PaintContext& context, TextPaintable const& paintabl
 
     auto text = fragment.string_view();
     CSSPixelRect cursor_rect {
-        fragment_rect.x() + CSSPixels::nearest_value_for(paintable.layout_node().first_available_font().width(text.substring_view(0, navigable.cursor_position()->offset() - fragment.start()))),
+        fragment_rect.x() + CSSPixels::nearest_value_for(paintable.layout_node().first_available_font().width(text.substring_view(0, document.cursor_position()->offset() - fragment.start()))),
         fragment_rect.top(),
         1,
         fragment_rect.height()
@@ -721,8 +698,7 @@ void PaintableWithLines::paint(PaintContext& context, PaintPhase phase) const
         context.display_list_recorder().save();
         // FIXME: Handle overflow-x and overflow-y being different values.
         auto clip_box_with_enclosing_scroll_frame_offset = clip_box;
-        if (enclosing_scroll_frame_offset().has_value())
-            clip_box_with_enclosing_scroll_frame_offset.translate_by(enclosing_scroll_frame_offset().value());
+        clip_box_with_enclosing_scroll_frame_offset.translate_by(enclosing_scroll_frame_offset());
         context.display_list_recorder().add_clip_rect(context.rounded_device_rect(clip_box_with_enclosing_scroll_frame_offset).to_type<int>());
 
         auto border_radii = normalized_border_radii_data(ShrinkRadiiForBorders::Yes);
@@ -733,8 +709,7 @@ void PaintableWithLines::paint(PaintContext& context, PaintPhase phase) const
             .bottom_left = border_radii.bottom_left.as_corner(context)
         };
         if (corner_radii.has_any_radius()) {
-            corner_clip_id = context.allocate_corner_clipper_id();
-            context.display_list_recorder().sample_under_corners(*corner_clip_id, corner_radii, context.rounded_device_rect(clip_box).to_type<int>(), CornerClip::Outside);
+            context.display_list_recorder().add_rounded_rect_clip(corner_radii, context.rounded_device_rect(clip_box).to_type<int>(), CornerClip::Outside);
         }
 
         context.display_list_recorder().save();
@@ -767,10 +742,6 @@ void PaintableWithLines::paint(PaintContext& context, PaintPhase phase) const
 
     if (should_clip_overflow) {
         context.display_list_recorder().restore();
-        if (corner_clip_id.has_value()) {
-            context.display_list_recorder().blit_corner_clipping(*corner_clip_id);
-            corner_clip_id = {};
-        }
         context.display_list_recorder().restore();
     }
 }
@@ -876,8 +847,7 @@ TraversalDecision PaintableBox::hit_test(CSSPixelPoint position, HitTestType typ
         return TraversalDecision::Continue;
 
     auto position_adjusted_by_scroll_offset = position;
-    if (enclosing_scroll_frame_offset().has_value())
-        position_adjusted_by_scroll_offset.translate_by(-enclosing_scroll_frame_offset().value());
+    position_adjusted_by_scroll_offset.translate_by(-enclosing_scroll_frame_offset());
 
     if (!is_visible())
         return TraversalDecision::Continue;
@@ -930,8 +900,7 @@ TraversalDecision PaintableWithLines::hit_test(CSSPixelPoint position, HitTestTy
         return TraversalDecision::Continue;
 
     auto position_adjusted_by_scroll_offset = position;
-    if (enclosing_scroll_frame_offset().has_value())
-        position_adjusted_by_scroll_offset.translate_by(-enclosing_scroll_frame_offset().value());
+    position_adjusted_by_scroll_offset.translate_by(-enclosing_scroll_frame_offset());
 
     if (!layout_box().children_are_inline() || m_fragments.is_empty()) {
         return PaintableBox::hit_test(position, type, callback);
@@ -1029,6 +998,178 @@ RefPtr<Gfx::Bitmap> PaintableBox::calculate_mask(PaintContext& context, CSSPixel
     Gfx::AntiAliasingPainter aa_painter(painter);
     aa_painter.fill_path(path, Color::Black);
     return bitmap;
+}
+
+void PaintableBox::resolve_paint_properties()
+{
+    auto const& computed_values = this->computed_values();
+    auto const& layout_node = this->layout_node();
+
+    // Border radii
+    CSSPixelRect const border_rect { 0, 0, border_box_width(), border_box_height() };
+    auto const& border_top_left_radius = computed_values.border_top_left_radius();
+    auto const& border_top_right_radius = computed_values.border_top_right_radius();
+    auto const& border_bottom_right_radius = computed_values.border_bottom_right_radius();
+    auto const& border_bottom_left_radius = computed_values.border_bottom_left_radius();
+
+    auto radii_data = normalize_border_radii_data(layout_node, border_rect, border_top_left_radius,
+        border_top_right_radius, border_bottom_right_radius,
+        border_bottom_left_radius);
+    set_border_radii_data(radii_data);
+
+    // Box shadows
+    auto const& box_shadow_data = computed_values.box_shadow();
+    Vector<Painting::ShadowData> resolved_box_shadow_data;
+    resolved_box_shadow_data.ensure_capacity(box_shadow_data.size());
+    for (auto const& layer : box_shadow_data) {
+        resolved_box_shadow_data.empend(
+            layer.color,
+            layer.offset_x.to_px(layout_node),
+            layer.offset_y.to_px(layout_node),
+            layer.blur_radius.to_px(layout_node),
+            layer.spread_distance.to_px(layout_node),
+            layer.placement == CSS::ShadowPlacement::Outer ? Painting::ShadowPlacement::Outer
+                                                           : Painting::ShadowPlacement::Inner);
+    }
+    set_box_shadow_data(move(resolved_box_shadow_data));
+
+    auto const& transformations = computed_values.transformations();
+    if (!transformations.is_empty()) {
+        auto matrix = Gfx::FloatMatrix4x4::identity();
+        for (auto const& transform : transformations)
+            matrix = matrix * transform.to_matrix(*this).release_value();
+        set_transform(matrix);
+    }
+
+    auto const& transform_origin = computed_values.transform_origin();
+    // https://www.w3.org/TR/css-transforms-1/#transform-box
+    auto transform_box = computed_values.transform_box();
+    // For SVG elements without associated CSS layout box, the used value for content-box is fill-box and for
+    // border-box is stroke-box.
+    // FIXME: This currently detects any SVG element except the <svg> one. Is that correct?
+    //        And is it correct to use `else` below?
+    if (is<Painting::SVGPaintable>(*this)) {
+        switch (transform_box) {
+        case CSS::TransformBox::ContentBox:
+            transform_box = CSS::TransformBox::FillBox;
+            break;
+        case CSS::TransformBox::BorderBox:
+            transform_box = CSS::TransformBox::StrokeBox;
+            break;
+        default:
+            break;
+        }
+    }
+    // For elements with associated CSS layout box, the used value for fill-box is content-box and for
+    // stroke-box and view-box is border-box.
+    else {
+        switch (transform_box) {
+        case CSS::TransformBox::FillBox:
+            transform_box = CSS::TransformBox::ContentBox;
+            break;
+        case CSS::TransformBox::StrokeBox:
+        case CSS::TransformBox::ViewBox:
+            transform_box = CSS::TransformBox::BorderBox;
+            break;
+        default:
+            break;
+        }
+    }
+
+    CSSPixelRect reference_box = [&]() {
+        switch (transform_box) {
+        case CSS::TransformBox::ContentBox:
+            // Uses the content box as reference box.
+            // FIXME: The reference box of a table is the border box of its table wrapper box, not its table box.
+            return absolute_rect();
+        case CSS::TransformBox::BorderBox:
+            // Uses the border box as reference box.
+            // FIXME: The reference box of a table is the border box of its table wrapper box, not its table box.
+            return absolute_border_box_rect();
+        case CSS::TransformBox::FillBox:
+            // Uses the object bounding box as reference box.
+            // FIXME: For now we're using the content rect as an approximation.
+            return absolute_rect();
+        case CSS::TransformBox::StrokeBox:
+            // Uses the stroke bounding box as reference box.
+            // FIXME: For now we're using the border rect as an approximation.
+            return absolute_border_box_rect();
+        case CSS::TransformBox::ViewBox:
+            // Uses the nearest SVG viewport as reference box.
+            // FIXME: If a viewBox attribute is specified for the SVG viewport creating element:
+            //  - The reference box is positioned at the origin of the coordinate system established by the viewBox attribute.
+            //  - The dimension of the reference box is set to the width and height values of the viewBox attribute.
+            auto* svg_paintable = first_ancestor_of_type<Painting::SVGSVGPaintable>();
+            if (!svg_paintable)
+                return absolute_border_box_rect();
+            return svg_paintable->absolute_rect();
+        }
+        VERIFY_NOT_REACHED();
+    }();
+    auto x = reference_box.left() + transform_origin.x.to_px(layout_node, reference_box.width());
+    auto y = reference_box.top() + transform_origin.y.to_px(layout_node, reference_box.height());
+    set_transform_origin({ x, y });
+    set_transform_origin({ x, y });
+
+    // Outlines
+    auto outline_width = computed_values.outline_width().to_px(layout_node);
+    auto outline_data = borders_data_for_outline(layout_node, computed_values.outline_color(), computed_values.outline_style(), outline_width);
+    auto outline_offset = computed_values.outline_offset().to_px(layout_node);
+    set_outline_data(outline_data);
+    set_outline_offset(outline_offset);
+
+    auto combined_transform = compute_combined_css_transform();
+    set_combined_css_transform(combined_transform);
+
+    CSSPixelRect background_rect;
+    Color background_color = computed_values.background_color();
+    auto const* background_layers = &computed_values.background_layers();
+    if (layout_box().is_root_element()) {
+        background_rect = navigable()->viewport_rect();
+
+        // Section 2.11.2: If the computed value of background-image on the root element is none and its background-color is transparent,
+        // user agents must instead propagate the computed values of the background properties from that element’s first HTML BODY child element.
+        if (document().html_element()->should_use_body_background_properties()) {
+            background_layers = document().background_layers();
+            background_color = document().background_color();
+        }
+    } else {
+        background_rect = absolute_padding_box_rect();
+    }
+
+    // HACK: If the Box has a border, use the bordered_rect to paint the background.
+    //       This way if we have a border-radius there will be no gap between the filling and actual border.
+    if (computed_values.border_top().width != 0 || computed_values.border_right().width != 0 || computed_values.border_bottom().width != 0 || computed_values.border_left().width != 0)
+        background_rect = absolute_border_box_rect();
+
+    m_resolved_background.layers.clear();
+    if (background_layers) {
+        m_resolved_background = resolve_background_layers(*background_layers, layout_box(), background_color, background_rect, normalized_border_radii_data());
+    };
+}
+
+void PaintableWithLines::resolve_paint_properties()
+{
+    PaintableBox::resolve_paint_properties();
+
+    auto const& layout_node = this->layout_node();
+    for (auto const& fragment : fragments()) {
+        auto const& text_shadow = fragment.m_layout_node->computed_values().text_shadow();
+        if (!text_shadow.is_empty()) {
+            Vector<Painting::ShadowData> resolved_shadow_data;
+            resolved_shadow_data.ensure_capacity(text_shadow.size());
+            for (auto const& layer : text_shadow) {
+                resolved_shadow_data.empend(
+                    layer.color,
+                    layer.offset_x.to_px(layout_node),
+                    layer.offset_y.to_px(layout_node),
+                    layer.blur_radius.to_px(layout_node),
+                    layer.spread_distance.to_px(layout_node),
+                    Painting::ShadowPlacement::Outer);
+            }
+            const_cast<Painting::PaintableFragment&>(fragment).set_shadows(move(resolved_shadow_data));
+        }
+    }
 }
 
 }

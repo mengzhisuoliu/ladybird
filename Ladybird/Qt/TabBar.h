@@ -1,12 +1,14 @@
 /*
  * Copyright (c) 2024, Tim Flynn <trflynn89@serenityos.org>
  * Copyright (c) 2024, Jamie Mansfield <jmansfield@cadixdev.org>
+ * Copyright (c) 2024, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
+#include <QProxyStyle>
 #include <QPushButton>
 #include <QTabBar>
 #include <QTabWidget>
@@ -33,6 +35,8 @@ class TabWidget : public QTabWidget {
 
 public:
     explicit TabWidget(QWidget* parent = nullptr);
+
+    virtual void paintEvent(QPaintEvent*) override;
 };
 
 class TabBarButton : public QPushButton {
@@ -43,6 +47,15 @@ public:
 
 protected:
     virtual bool event(QEvent* event) override;
+};
+
+class TabStyle : public QProxyStyle {
+    Q_OBJECT
+
+public:
+    explicit TabStyle(QObject* parent = nullptr);
+
+    virtual QRect subElementRect(QStyle::SubElement, QStyleOption const*, QWidget const*) const override;
 };
 
 }

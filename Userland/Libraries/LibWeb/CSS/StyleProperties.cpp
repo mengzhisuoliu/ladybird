@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2018-2023, Andreas Kling <kling@serenityos.org>
- * Copyright (c) 2021-2023, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2018-2024, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2021-2024, Sam Atkins <atkinssj@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -11,6 +11,8 @@
 #include <LibWeb/CSS/StyleProperties.h>
 #include <LibWeb/CSS/StyleValues/AngleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ContentStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CounterDefinitionsStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CounterStyleValue.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GridAutoFlowStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GridTemplateAreaStyleValue.h>
@@ -35,19 +37,62 @@
 
 namespace Web::CSS {
 
+NonnullRefPtr<StyleProperties> StyleProperties::clone() const
+{
+    auto clone = adopt_ref(*new StyleProperties);
+    clone->m_property_values = m_property_values;
+    clone->m_animated_property_values = m_animated_property_values;
+    clone->m_property_important = m_property_important;
+    clone->m_property_inherited = m_property_inherited;
+    clone->m_font_list = m_font_list;
+    clone->m_line_height = m_line_height;
+    clone->m_animation_name_source = m_animation_name_source;
+    clone->m_math_depth = m_math_depth;
+    return clone;
+}
+
 bool StyleProperties::is_property_important(CSS::PropertyID property_id) const
 {
-    return m_property_values[to_underlying(property_id)].style && m_property_values[to_underlying(property_id)].important == Important::Yes;
+    size_t n = to_underlying(property_id);
+    return m_property_important[n / 8] & (1 << (n % 8));
+}
+
+void StyleProperties::set_property_important(CSS::PropertyID property_id, Important important)
+{
+    size_t n = to_underlying(property_id);
+    if (important == Important::Yes)
+        m_property_important[n / 8] |= (1 << (n % 8));
+    else
+        m_property_important[n / 8] &= ~(1 << (n % 8));
 }
 
 bool StyleProperties::is_property_inherited(CSS::PropertyID property_id) const
 {
-    return m_property_values[to_underlying(property_id)].style && m_property_values[to_underlying(property_id)].inherited == Inherited::Yes;
+    size_t n = to_underlying(property_id);
+    return m_property_inherited[n / 8] & (1 << (n % 8));
 }
 
-void StyleProperties::set_property(CSS::PropertyID id, NonnullRefPtr<StyleValue const> value, CSS::CSSStyleDeclaration const* source_declaration, Inherited inherited, Important important)
+void StyleProperties::set_property_inherited(CSS::PropertyID property_id, Inherited inherited)
 {
-    m_property_values[to_underlying(id)] = StyleAndSourceDeclaration { move(value), source_declaration, important, inherited };
+    size_t n = to_underlying(property_id);
+    if (inherited == Inherited::Yes)
+        m_property_inherited[n / 8] |= (1 << (n % 8));
+    else
+        m_property_inherited[n / 8] &= ~(1 << (n % 8));
+}
+
+void StyleProperties::set_property(CSS::PropertyID id, NonnullRefPtr<StyleValue const> value, Inherited inherited, Important important)
+{
+    m_property_values[to_underlying(id)] = move(value);
+    set_property_important(id, important);
+    set_property_inherited(id, inherited);
+}
+
+void StyleProperties::revert_property(CSS::PropertyID id, StyleProperties const& style_for_revert)
+{
+    m_property_values[to_underlying(id)] = style_for_revert.m_property_values[to_underlying(id)];
+    set_property_important(id, style_for_revert.is_property_important(id) ? Important::Yes : Important::No);
+    set_property_inherited(id, style_for_revert.is_property_inherited(id) ? Inherited::Yes : Inherited::No);
 }
 
 void StyleProperties::set_animated_property(CSS::PropertyID id, NonnullRefPtr<StyleValue const> value)
@@ -66,19 +111,14 @@ NonnullRefPtr<StyleValue const> StyleProperties::property(CSS::PropertyID proper
         return *animated_value;
 
     // By the time we call this method, all properties have values assigned.
-    return *m_property_values[to_underlying(property_id)].style;
+    return *m_property_values[to_underlying(property_id)];
 }
 
 RefPtr<StyleValue const> StyleProperties::maybe_null_property(CSS::PropertyID property_id) const
 {
     if (auto animated_value = m_animated_property_values.get(property_id).value_or(nullptr))
         return *animated_value;
-    return m_property_values[to_underlying(property_id)].style;
-}
-
-CSS::CSSStyleDeclaration const* StyleProperties::property_source_declaration(CSS::PropertyID property_id) const
-{
-    return m_property_values[to_underlying(property_id)].declaration;
+    return m_property_values[to_underlying(property_id)];
 }
 
 CSS::Size StyleProperties::size_value(CSS::PropertyID id) const
@@ -574,15 +614,15 @@ bool StyleProperties::operator==(StyleProperties const& other) const
     for (size_t i = 0; i < m_property_values.size(); ++i) {
         auto const& my_style = m_property_values[i];
         auto const& other_style = other.m_property_values[i];
-        if (!my_style.style) {
-            if (other_style.style)
+        if (!my_style) {
+            if (other_style)
                 return false;
             continue;
         }
-        if (!other_style.style)
+        if (!other_style)
             return false;
-        auto const& my_value = *my_style.style;
-        auto const& other_value = *other_style.style;
+        auto const& my_value = *my_style;
+        auto const& other_value = *other_style;
         if (my_value.type() != other_value.type())
             return false;
         if (my_value != other_value)
@@ -608,6 +648,12 @@ Optional<CSS::TextJustify> StyleProperties::text_justify() const
 {
     auto value = property(CSS::PropertyID::TextJustify);
     return value_id_to_text_justify(value->to_identifier());
+}
+
+Optional<CSS::TextOverflow> StyleProperties::text_overflow() const
+{
+    auto value = property(CSS::PropertyID::TextOverflow);
+    return value_id_to_text_overflow(value->to_identifier());
 }
 
 Optional<CSS::PointerEvents> StyleProperties::pointer_events() const
@@ -646,7 +692,7 @@ Optional<CSS::Clear> StyleProperties::clear() const
     return value_id_to_clear(value->to_identifier());
 }
 
-StyleProperties::ContentDataAndQuoteNestingLevel StyleProperties::content(u32 initial_quote_nesting_level) const
+StyleProperties::ContentDataAndQuoteNestingLevel StyleProperties::content(DOM::Element& element, u32 initial_quote_nesting_level) const
 {
     auto value = property(CSS::PropertyID::Content);
     auto quotes_data = quotes();
@@ -709,8 +755,10 @@ StyleProperties::ContentDataAndQuoteNestingLevel StyleProperties::content(u32 in
                     dbgln("`{}` is not supported in `content` (yet?)", item->to_string());
                     break;
                 }
+            } else if (item->is_counter()) {
+                builder.append(item->as_counter().resolve(element));
             } else {
-                // TODO: Implement counters, images, and other things.
+                // TODO: Implement images, and other things.
                 dbgln("`{}` is not supported in `content` (yet?)", item->to_string());
             }
         }
@@ -722,8 +770,10 @@ StyleProperties::ContentDataAndQuoteNestingLevel StyleProperties::content(u32 in
             for (auto const& item : content_style_value.alt_text()->values()) {
                 if (item->is_string()) {
                     alt_text_builder.append(item->as_string().string_value());
+                } else if (item->is_counter()) {
+                    alt_text_builder.append(item->as_counter().resolve(element));
                 } else {
-                    // TODO: Implement counters
+                    dbgln("`{}` is not supported in `content` alt-text (yet?)", item->to_string());
                 }
             }
             content_data.alt_text = MUST(alt_text_builder.to_string());
@@ -1091,6 +1141,42 @@ QuotesData StyleProperties::quotes() const
     }
 
     return InitialValues::quotes();
+}
+
+Vector<CounterData> StyleProperties::counter_data(PropertyID property_id) const
+{
+    auto value = property(property_id);
+
+    if (value->is_counter_definitions()) {
+        auto& counter_definitions = value->as_counter_definitions().counter_definitions();
+        Vector<CounterData> result;
+        for (auto& counter : counter_definitions) {
+            CounterData data {
+                .name = counter.name,
+                .is_reversed = counter.is_reversed,
+                .value = {},
+            };
+            if (counter.value) {
+                if (counter.value->is_integer()) {
+                    data.value = AK::clamp_to<i32>(counter.value->as_integer().integer());
+                } else if (counter.value->is_calculated()) {
+                    auto maybe_int = counter.value->as_calculated().resolve_integer();
+                    if (maybe_int.has_value())
+                        data.value = AK::clamp_to<i32>(*maybe_int);
+                } else {
+                    dbgln("Unimplemented type for {} integer value: '{}'", string_from_property_id(property_id), counter.value->to_string());
+                }
+            }
+            result.append(move(data));
+        }
+        return result;
+    }
+
+    if (value->to_identifier() == ValueID::None)
+        return {};
+
+    dbgln("Unhandled type for {} value: '{}'", string_from_property_id(property_id), value->to_string());
+    return {};
 }
 
 Optional<CSS::ScrollbarWidth> StyleProperties::scrollbar_width() const

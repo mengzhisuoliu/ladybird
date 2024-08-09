@@ -191,14 +191,13 @@ void TreeBuilder::insert_node_into_inline_or_block_ancestor(Layout::Node& node, 
 void TreeBuilder::create_pseudo_element_if_needed(DOM::Element& element, CSS::Selector::PseudoElement::Type pseudo_element, AppendOrPrepend mode)
 {
     auto& document = element.document();
-    auto& style_computer = document.style_computer();
 
-    auto pseudo_element_style = style_computer.compute_pseudo_element_style_if_needed(element, pseudo_element);
+    auto pseudo_element_style = element.pseudo_element_computed_css_values(pseudo_element);
     if (!pseudo_element_style)
         return;
 
     auto initial_quote_nesting_level = m_quote_nesting_level;
-    auto [pseudo_element_content, final_quote_nesting_level] = pseudo_element_style->content(initial_quote_nesting_level);
+    auto [pseudo_element_content, final_quote_nesting_level] = pseudo_element_style->content(element, initial_quote_nesting_level);
     m_quote_nesting_level = final_quote_nesting_level;
     auto pseudo_element_display = pseudo_element_style->display();
     // ::before and ::after only exist if they have content. `content: normal` computes to `none` for them.
@@ -230,7 +229,7 @@ void TreeBuilder::create_pseudo_element_if_needed(DOM::Element& element, CSS::Se
         auto text_node = document.heap().allocate_without_realm<Layout::TextNode>(document, *text);
         text_node->set_generated_for(generated_for, element);
 
-        push_parent(verify_cast<NodeWithStyle>(*pseudo_element_node));
+        push_parent(*pseudo_element_node);
         insert_node_into_inline_or_block_ancestor(*text_node, text_node->display(), AppendOrPrepend::Append);
         pop_parent();
     } else {
@@ -334,9 +333,11 @@ void TreeBuilder::create_layout_tree(DOM::Node& dom_node, TreeBuilder::Context& 
         element.clear_pseudo_element_nodes({});
         VERIFY(!element.needs_style_update());
         style = element.computed_css_values();
+        element.resolve_counters(*style);
         display = style->display();
         if (display.is_none())
             return;
+        // TODO: Implement changing element contents with the `content` property.
         if (context.layout_svg_mask_or_clip_path) {
             if (is<SVG::SVGMaskElement>(dom_node))
                 layout_node = document.heap().allocate_without_realm<Layout::SVGMaskBox>(document, static_cast<SVG::SVGMaskElement&>(dom_node), *style);

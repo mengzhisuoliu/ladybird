@@ -49,10 +49,9 @@ ErrorOr<ByteBuffer> HttpRequest::to_raw_request() const
     StringBuilder builder;
     TRY(builder.try_append(method_name()));
     TRY(builder.try_append(' '));
-    // NOTE: The percent_encode is so that e.g. spaces are properly encoded.
     auto path = m_url.serialize_path();
     VERIFY(!path.is_empty());
-    TRY(builder.try_append(URL::percent_encode(path, URL::PercentEncodeSet::EncodeURI)));
+    TRY(builder.try_append(path));
     if (m_url.query().has_value()) {
         TRY(builder.try_append('?'));
         TRY(builder.try_append(*m_url.query()));
@@ -271,12 +270,12 @@ Optional<Header> HttpRequest::get_http_basic_authentication_header(URL::URL cons
     if (!url.includes_credentials())
         return {};
     StringBuilder builder;
-    builder.append(url.username().release_value_but_fixme_should_propagate_errors());
+    builder.append(URL::percent_decode(url.username()));
     builder.append(':');
-    builder.append(url.password().release_value_but_fixme_should_propagate_errors());
+    builder.append(URL::percent_decode(url.password()));
 
     // FIXME: change to TRY() and make method fallible
-    auto token = MUST(encode_base64(MUST(builder.to_string()).bytes()));
+    auto token = MUST(encode_base64(builder.string_view().bytes()));
     builder.clear();
     builder.append("Basic "sv);
     builder.append(token);

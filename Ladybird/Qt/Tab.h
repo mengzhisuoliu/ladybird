@@ -29,7 +29,7 @@ class Tab final : public QWidget {
     Q_OBJECT
 
 public:
-    Tab(BrowserWindow* window, WebContentOptions const&, StringView webdriver_content_ipc_path, RefPtr<WebView::WebContentClient> parent_client = nullptr, size_t page_index = 0);
+    Tab(BrowserWindow* window, RefPtr<WebView::WebContentClient> parent_client = nullptr, size_t page_index = 0);
     virtual ~Tab() override;
 
     WebContentView& view() { return *m_view; }
@@ -73,6 +73,8 @@ public:
     void set_scripting(bool);
     void set_user_agent_string(ByteString const&);
     void set_navigator_compatibility_mode(ByteString const&);
+
+    void set_preferred_languages(Vector<String> const& preferred_languages);
 
     void set_enable_do_not_track(bool);
 

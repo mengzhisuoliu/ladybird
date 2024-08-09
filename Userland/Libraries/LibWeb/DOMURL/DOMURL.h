@@ -40,10 +40,10 @@ public:
     WebIDL::ExceptionOr<String> protocol() const;
     WebIDL::ExceptionOr<void> set_protocol(String const&);
 
-    WebIDL::ExceptionOr<String> username() const;
+    String const& username() const;
     void set_username(String const&);
 
-    WebIDL::ExceptionOr<String> password() const;
+    String const& password() const;
     void set_password(String const&);
 
     WebIDL::ExceptionOr<String> host() const;
@@ -55,7 +55,7 @@ public:
     WebIDL::ExceptionOr<String> port() const;
     void set_port(String const&);
 
-    WebIDL::ExceptionOr<String> pathname() const;
+    String pathname() const;
     void set_pathname(String const&);
 
     Optional<String> const& fragment() const { return m_url.fragment(); }
@@ -99,6 +99,6 @@ bool host_is_domain(URL::Host const&);
 void strip_trailing_spaces_from_an_opaque_path(DOMURL& url);
 
 // https://url.spec.whatwg.org/#concept-url-parser
-URL::URL parse(StringView input, Optional<URL::URL> const& base_url = {});
+URL::URL parse(StringView input, Optional<URL::URL> const& base_url = {}, Optional<StringView> encoding = {});
 
 }

@@ -9,7 +9,6 @@
 
 #include "Tab.h"
 #include <Ladybird/Qt/FindInPageWidget.h>
-#include <Ladybird/Types.h>
 #include <LibCore/Forward.h>
 #include <LibWeb/HTML/ActivateTab.h>
 #include <LibWeb/HTML/AudioPlayState.h>
@@ -31,7 +30,12 @@ class BrowserWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    BrowserWindow(Vector<URL::URL> const& initial_urls, WebView::CookieJar&, WebContentOptions const&, StringView webdriver_content_ipc_path, bool allow_popups, Tab* parent_tab = nullptr, Optional<u64> page_index = {});
+    enum class IsPopupWindow {
+        No,
+        Yes,
+    };
+
+    BrowserWindow(Vector<URL::URL> const& initial_urls, WebView::CookieJar&, IsPopupWindow is_popup_window = IsPopupWindow::No, Tab* parent_tab = nullptr, Optional<u64> page_index = {});
 
     WebContentView& view() const { return m_current_tab->view(); }
 
@@ -179,9 +183,13 @@ private:
     Web::CSS::PreferredColorScheme m_preferred_color_scheme;
     void set_preferred_color_scheme(Web::CSS::PreferredColorScheme color_scheme);
 
+    static void dump_connection_info();
+
     QTabWidget* m_tabs_container { nullptr };
     Tab* m_current_tab { nullptr };
     QMenu* m_zoom_menu { nullptr };
+
+    QToolBar* m_new_tab_button_toolbar { nullptr };
 
     QMenu* m_hamburger_menu { nullptr };
 
@@ -208,10 +216,7 @@ private:
 
     WebView::CookieJar& m_cookie_jar;
 
-    WebContentOptions m_web_content_options;
-    StringView m_webdriver_content_ipc_path;
-
-    bool m_allow_popups { false };
+    IsPopupWindow m_is_popup_window { IsPopupWindow::No };
 };
 
 }

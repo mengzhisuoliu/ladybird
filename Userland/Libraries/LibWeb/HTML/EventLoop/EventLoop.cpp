@@ -384,7 +384,7 @@ void EventLoop::process()
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#queue-a-task
-int queue_a_task(HTML::Task::Source source, JS::GCPtr<EventLoop> event_loop, JS::GCPtr<DOM::Document> document, JS::NonnullGCPtr<JS::HeapFunction<void()>> steps)
+TaskID queue_a_task(HTML::Task::Source source, JS::GCPtr<EventLoop> event_loop, JS::GCPtr<DOM::Document> document, JS::NonnullGCPtr<JS::HeapFunction<void()>> steps)
 {
     // 1. If event loop was not given, set event loop to the implied event loop.
     if (!event_loop)
@@ -400,7 +400,7 @@ int queue_a_task(HTML::Task::Source source, JS::GCPtr<EventLoop> event_loop, JS:
     auto task = HTML::Task::create(event_loop->vm(), source, document, steps);
 
     // 8. Let queue be the task queue to which source is associated on event loop.
-    auto& queue = event_loop->task_queue();
+    auto& queue = source == HTML::Task::Source::Microtask ? event_loop->microtask_queue() : event_loop->task_queue();
 
     // 9. Append task to queue.
     queue.add(task);
@@ -409,7 +409,7 @@ int queue_a_task(HTML::Task::Source source, JS::GCPtr<EventLoop> event_loop, JS:
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#queue-a-global-task
-int queue_global_task(HTML::Task::Source source, JS::Object& global_object, JS::NonnullGCPtr<JS::HeapFunction<void()>> steps)
+TaskID queue_global_task(HTML::Task::Source source, JS::Object& global_object, JS::NonnullGCPtr<JS::HeapFunction<void()>> steps)
 {
     // 1. Let event loop be global's relevant agent's event loop.
     auto& global_custom_data = verify_cast<Bindings::WebEngineCustomData>(*global_object.vm().custom_data());

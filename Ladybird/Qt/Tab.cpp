@@ -47,7 +47,7 @@ static QIcon default_favicon()
     return icon;
 }
 
-Tab::Tab(BrowserWindow* window, WebContentOptions const& web_content_options, StringView webdriver_content_ipc_path, RefPtr<WebView::WebContentClient> parent_client, size_t page_index)
+Tab::Tab(BrowserWindow* window, RefPtr<WebView::WebContentClient> parent_client, size_t page_index)
     : QWidget(window)
     , m_window(window)
 {
@@ -55,7 +55,7 @@ Tab::Tab(BrowserWindow* window, WebContentOptions const& web_content_options, St
     m_layout->setSpacing(0);
     m_layout->setContentsMargins(0, 0, 0, 0);
 
-    m_view = new WebContentView(this, web_content_options, webdriver_content_ipc_path, parent_client, page_index);
+    m_view = new WebContentView(this, parent_client, page_index);
     m_find_in_page = new FindInPageWidget(this, m_view);
     m_find_in_page->setVisible(false);
     m_toolbar = new QToolBar(this);
@@ -90,7 +90,6 @@ Tab::Tab(BrowserWindow* window, WebContentOptions const& web_content_options, St
     m_toolbar->addAction(&m_window->go_forward_action());
     m_toolbar->addAction(&m_window->reload_action());
     m_toolbar->addWidget(m_location_edit);
-    m_toolbar->addAction(&m_window->new_tab_action());
     m_toolbar->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
     m_hamburger_button_action = m_toolbar->addWidget(m_hamburger_button);
     m_toolbar->setIconSize({ 16, 16 });
@@ -1004,6 +1003,11 @@ void Tab::set_user_agent_string(ByteString const& user_agent)
 void Tab::set_navigator_compatibility_mode(ByteString const& compatibility_mode)
 {
     debug_request("navigator-compatibility-mode", compatibility_mode);
+}
+
+void Tab::set_preferred_languages(Vector<String> const& preferred_languages)
+{
+    m_view->set_preferred_languages(preferred_languages);
 }
 
 void Tab::set_enable_do_not_track(bool enable)

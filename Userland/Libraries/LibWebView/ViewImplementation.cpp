@@ -169,6 +169,11 @@ void ViewImplementation::set_preferred_motion(Web::CSS::PreferredMotion motion)
     client().async_set_preferred_motion(page_id(), motion);
 }
 
+void ViewImplementation::set_preferred_languages(Vector<String> preferred_languages)
+{
+    client().async_set_preferred_languages(page_id(), move(preferred_languages));
+}
+
 void ViewImplementation::set_enable_do_not_track(bool enable)
 {
     client().async_set_enable_do_not_track(page_id(), enable);
@@ -426,8 +431,8 @@ void ViewImplementation::did_allocate_iosurface_backing_stores(i32 front_id, Cor
 
     auto bytes_per_row = front_iosurface.bytes_per_row();
 
-    auto front_bitmap = Gfx::Bitmap::create_wrapper(Gfx::BitmapFormat::BGRA8888, front_size, bytes_per_row, front_iosurface.data(), [handle = move(front_iosurface)] {});
-    auto back_bitmap = Gfx::Bitmap::create_wrapper(Gfx::BitmapFormat::BGRA8888, back_size, bytes_per_row, back_iosurface.data(), [handle = move(back_iosurface)] {});
+    auto front_bitmap = Gfx::Bitmap::create_wrapper(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, front_size, bytes_per_row, front_iosurface.data(), [handle = move(front_iosurface)] {});
+    auto back_bitmap = Gfx::Bitmap::create_wrapper(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, back_size, bytes_per_row, back_iosurface.data(), [handle = move(back_iosurface)] {});
 
     m_client_state.front_bitmap.bitmap = front_bitmap.release_value_but_fixme_should_propagate_errors();
     m_client_state.front_bitmap.id = front_id;
@@ -444,6 +449,7 @@ void ViewImplementation::handle_resize()
 void ViewImplementation::handle_web_content_process_crash()
 {
     dbgln("WebContent process crashed!");
+    dbgln("Consider raising an issue at https://github.com/LadybirdBrowser/ladybird/issues");
 
     ++m_crash_count;
     constexpr size_t max_reasonable_crash_count = 5U;

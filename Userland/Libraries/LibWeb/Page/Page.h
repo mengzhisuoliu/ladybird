@@ -277,7 +277,6 @@ struct PaintOptions {
 };
 
 enum class DisplayListPlayerType {
-    CPU,
     SkiaGPUIfAvailable,
     SkiaCPU,
 };
@@ -312,13 +311,13 @@ public:
     virtual void page_did_start_loading(URL::URL const&, bool is_redirect) { (void)is_redirect; }
     virtual void page_did_create_new_document(Web::DOM::Document&) { }
     virtual void page_did_change_active_document_in_top_level_browsing_context(Web::DOM::Document&) { }
-    virtual void page_did_destroy_document(Web::DOM::Document&) { }
     virtual void page_did_finish_loading(URL::URL const&) { }
     virtual void page_did_request_cursor_change(Gfx::StandardCursor) { }
     virtual void page_did_request_context_menu(CSSPixelPoint) { }
     virtual void page_did_request_link_context_menu(CSSPixelPoint, URL::URL const&, [[maybe_unused]] ByteString const& target, [[maybe_unused]] unsigned modifiers) { }
     virtual void page_did_request_image_context_menu(CSSPixelPoint, URL::URL const&, [[maybe_unused]] ByteString const& target, [[maybe_unused]] unsigned modifiers, Gfx::Bitmap const*) { }
     virtual void page_did_request_media_context_menu(CSSPixelPoint, [[maybe_unused]] ByteString const& target, [[maybe_unused]] unsigned modifiers, Page::MediaContextMenu) { }
+    virtual void page_did_click_link(URL::URL const&, [[maybe_unused]] ByteString const& target, [[maybe_unused]] unsigned modifiers) { }
     virtual void page_did_middle_click_link(URL::URL const&, [[maybe_unused]] ByteString const& target, [[maybe_unused]] unsigned modifiers) { }
     virtual void page_did_request_tooltip_override(CSSPixelPoint, ByteString const&) { }
     virtual void page_did_stop_tooltip_override() { }
