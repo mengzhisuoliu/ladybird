@@ -131,6 +131,14 @@ FormattingContext::FormattingContext(Type type, LayoutMode layout_mode, LayoutSt
 
 FormattingContext::~FormattingContext() = default;
 
+bool FormattingContext::computed_height_establishes_definite_containing_block_height(CSS::Size const& computed_height)
+{
+    // A resolved used height is not always a definite containing block height.
+    // Intrinsic sizing keywords like fit-content still depend on child layout,
+    // so percentage-height descendants must continue to treat them as indefinite.
+    return !computed_height.is_intrinsic_sizing_constraint();
+}
+
 // https://developer.mozilla.org/en-US/docs/Web/Guide/CSS/Block_formatting_context
 bool FormattingContext::creates_block_formatting_context(Box const& box)
 {
@@ -1331,7 +1339,8 @@ void FormattingContext::compute_height_for_absolutely_positioned_non_replaced_el
     // do not set calculated insets or margins on the first pass, there will be a second pass
     if (box.computed_values().height().is_auto() && before_or_after_inside_layout == BeforeOrAfterInsideLayout::Before)
         return;
-    box_state.set_has_definite_height(true);
+    if (computed_height_establishes_definite_containing_block_height(box.computed_values().height()))
+        box_state.set_has_definite_height(true);
     box_state.inset_top = top.to_px_or_zero(box, height_of_containing_block);
     box_state.inset_bottom = bottom.to_px_or_zero(box, height_of_containing_block);
     box_state.margin_top = margin_top.to_px_or_zero(box, width_of_containing_block);
@@ -1734,7 +1743,8 @@ void FormattingContext::layout_absolutely_positioned_element(Box& box)
     if (is_non_auto(computed_values.inset().left()) && is_non_auto(computed_values.inset().right())) {
         box_state.set_has_definite_width(true);
     }
-    if (is_non_auto(computed_values.inset().top()) && is_non_auto(computed_values.inset().bottom())) {
+    if (is_non_auto(computed_values.inset().top()) && is_non_auto(computed_values.inset().bottom())
+        && (computed_values.height().is_auto() || computed_height_establishes_definite_containing_block_height(computed_values.height()))) {
         box_state.set_has_definite_height(true);
     }
 
@@ -1747,7 +1757,7 @@ void FormattingContext::layout_absolutely_positioned_element(Box& box)
             && box.has_preferred_aspect_ratio()
             && box_state.has_definite_width();
         box_state.set_has_definite_width(true);
-        if (!computed_values.height().is_auto() || height_resolved_from_aspect_ratio)
+        if ((!computed_values.height().is_auto() && computed_height_establishes_definite_containing_block_height(computed_values.height())) || height_resolved_from_aspect_ratio)
             box_state.set_has_definite_height(true);
     }
 
@@ -1900,7 +1910,8 @@ void FormattingContext::compute_height_for_absolutely_positioned_replaced_elemen
     // do not set calculated insets or margins on the first pass, there will be a second pass
     if (box.computed_values().height().is_auto() && before_or_after_inside_layout == BeforeOrAfterInsideLayout::Before)
         return;
-    box_state.set_has_definite_height(true);
+    if (computed_height_establishes_definite_containing_block_height(box.computed_values().height()))
+        box_state.set_has_definite_height(true);
     box_state.inset_top = to_px(top);
     box_state.inset_bottom = to_px(bottom);
     box_state.margin_top = to_px(margin_top);
